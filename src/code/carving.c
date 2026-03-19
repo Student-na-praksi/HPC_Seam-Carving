@@ -41,46 +41,54 @@ void copy_image(unsigned char *image_out, const unsigned char *image_in, const s
     }
     
 }
-// uses channel ch (0=R). You can switch to luminance later.
-void calculate_energy(unsigned char *out, const unsigned char *image_in, int w, int h, int cpp)
+// Compute Sobel energy image from input image.
+// Output is grayscale-like (same value written to R,G,B if present).
+// For RGB images, Sobel is computed per channel and averaged.
+// For grayscale images, only one channel is used.
+void calculate_energy(unsigned char *image_out, const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk)
 {
-    #pragma omp parallel
-    {
-        // Print thread, CPU, and NUMA node information
-        #pragma omp single
-        printf("Using %d threads.\n", omp_get_num_threads());
-
-        int tid = omp_get_thread_num();
-        int cpu = sched_getcpu();
-        int node = numa_node_of_cpu(cpu);
-
-        #pragma omp critical
-        printf("Thread %d -> CPU %d NUMA %d\n", tid, cpu, node);
-    }
-
     const int channels_to_use = (cpp >= 3) ? 3 : 1;
 
     #define CLP(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))
     #define PIX(ii, jj, ch) image_in[((ii) * w + (jj)) * cpp + (ch)]
 
-    // Helper writes one grayscale energy value into RGB (or single channel for grayscale).
-    #define STORE_ENERGY(ii, jj, evalue)                \
-        do {                                            \
-            int o = ((ii) * w + (jj)) * cpp;            \
-            unsigned char ev = (unsigned char)(evalue); \
-            image_out[o + 0] = ev;                            \
-            if (cpp > 1) image_out[o + 1] = ev;               \
-            if (cpp > 2) image_out[o + 2] = ev;               \
-            if (cpp > 3) image_out[o + 3] = image_in[o + 3];        \
+    // #pragma omp parallel
+    // {
+    //     // Print thread, CPU, and NUMA node information
+    //     #pragma omp single
+    //     printf("Using %d threads.\n", omp_get_num_threads());
+
+    //     int tid = omp_get_thread_num();
+    //     int cpu = sched_getcpu();
+    //     int node = numa_node_of_cpu(cpu);
+
+    //     #pragma omp critical
+    //     printf("Thread %d -> CPU %d NUMA %d\n", tid, cpu, node);
+    // }
+
+    //OUTPUT FROMATING
+    // Write one scalar energy value into output pixel:
+    // - grayscale: one channel
+    // - RGB: write same value to R,G,B
+    // - RGBA: preserve alpha
+    #define STORE_ENERGY(ii, jj, evalue)                    \
+        do {                                                \
+            int o = ((ii) * w + (jj)) * cpp;                \
+            unsigned char ev = (unsigned char)(evalue);     \
+            image_out[o + 0] = ev;                          \
+            if (cpp > 1) image_out[o + 1] = ev;             \
+            if (cpp > 2) image_out[o + 2] = ev;             \
+            if (cpp > 3) image_out[o + 3] = image_in[o + 3];\
         } while (0)
 
-    // 1) Interior pixels: no clamp checks needed because all neighbors are in-bounds.
-    // i = row index, j = column index.
-    #pragma omp parallel for schedule(static)
+    // 1) Interior pixels: no clamp checks needed because neighbors exist on all sides.
+    //    i = row index, j = column index.
+    //    schedule(static, rows_per_chunk) assigns contiguous row blocks to threads.
+    #pragma omp parallel for schedule(static, rows_per_chunk)
     for (int i = 1; i < h - 1; ++i) {
-        const unsigned char *row_above = in + (i - 1) * w * cpp;
-        const unsigned char *row_current = in + i * w * cpp;
-        const unsigned char *row_below = in + (i + 1) * w * cpp;
+        const unsigned char *row_above = image_in + (i - 1) * w * cpp;
+        const unsigned char *row_current = image_in + i * w * cpp;
+        const unsigned char *row_below = image_in + (i + 1) * w * cpp;
 
         for (int j = 1; j < w - 1; ++j) {
             int e_sum = 0;
@@ -100,13 +108,15 @@ void calculate_energy(unsigned char *out, const unsigned char *image_in, int w, 
                 e_sum += (int)sqrt((double)(gx * gx + gy * gy));
             }
 
+            //per chanel adverage
             int e = e_sum / channels_to_use;
             if (e > 255) e = 255;
             STORE_ENERGY(i, j, e);
         }
     }
 
-    // 2) First and last columns for every row. Clamp handles neighbors outside [0, w-1].
+    // 2) Left and right border columns for each row.
+    //    Clamp maps out-of-range neighbors to nearest valid pixel.
     for (int i = 0; i < h; ++i) {
         for (int edge = 0; edge < 2; ++edge) {
             int j = (edge == 0) ? 0 : (w - 1);
@@ -130,7 +140,8 @@ void calculate_energy(unsigned char *out, const unsigned char *image_in, int w, 
         }
     }
 
-    // 3) First and last rows, excluding corners (corners were already written above).
+    // 3) Top and bottom border rows, excluding corners.
+    //    Corners were already covered by step 2.
     for (int j = 1; j < w - 1; ++j) {
         for (int edge = 0; edge < 2; ++edge) {
             int i = (edge == 0) ? 0 : (h - 1);
@@ -159,50 +170,228 @@ void calculate_energy(unsigned char *out, const unsigned char *image_in, int w, 
     #undef CLP
 }
 
+void seam_carving_dynamic(const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk, int *remove_indexes)
+{
+    if (w <= 1 || h <= 0 || cpp <= 0) {
+        return;
+    }
+
+    // cumulative[i,j] stores minimum path energy from (i,j) down to last row.
+    int *cumulative = (int *)malloc((size_t)w * (size_t)h * sizeof(int));
+    // steering[i,j] stores next-row column movement: -1 (left), 0 (down), +1 (right).
+    signed char *steering = (signed char *)malloc((size_t)w * (size_t)h * sizeof(signed char));
+
+    if (cumulative == NULL || steering == NULL || remove_indexes == NULL) {
+        printf("Error: Failed to allocate memory for seam carving buffers!\n");
+        free(cumulative);
+        free(steering);
+        return;
+    }
+
+    // Base case: last row has no children, so cumulative equals local energy.
+    // image_in here is the energy image; channel 0 contains the scalar energy value.
+    #pragma omp parallel for schedule(static)
+    for (int j = 0; j < w; ++j) {
+        cumulative[(h - 1) * w + j] = image_in[((h - 1) * w + j) * cpp + 0];
+        steering[(h - 1) * w + j] = 0;
+    }
+
+    // DP recurrence (bottom -> top):
+    // M(i,j) = E(i,j) + min(M(i+1,j-1), M(i+1,j), M(i+1,j+1)).
+    // Rows are sequential because each row depends on the row below.
+    // Columns inside one row are independent and parallelized.
+    #pragma omp parallel
+    {
+        for (int i = h - 2; i >= 0; --i) {
+            #pragma omp for schedule(static)
+            for (int j = 0; j < w; ++j) {
+                int best_col = j;
+                int best = cumulative[(i + 1) * w + j];
+
+                if (j > 0) {
+                    int left = cumulative[(i + 1) * w + (j - 1)];
+                    if (left < best) {
+                        best = left;
+                        best_col = j - 1;
+                    }
+                }
+                if (j + 1 < w) {
+                    int right = cumulative[(i + 1) * w + (j + 1)];
+                    if (right < best) {
+                        best = right;
+                        best_col = j + 1;
+                    }
+                }
+
+                cumulative[i * w + j] = (int)image_in[(i * w + j) * cpp + 0] + best;
+                steering[i * w + j] = (signed char)(best_col - j); // -1, 0, +1
+            }
+        }
+    }
+
+    // Seam starts at global minimum in top row.
+    int best_top_col = 0;
+    int best_top_energy = cumulative[0];
+    for (int j = 1; j < w; ++j) {
+        int val = cumulative[j];
+        if (val < best_top_energy) {
+            best_top_energy = val;
+            best_top_col = j;
+        }
+    }
+
+    // Backtrack seam from top to bottom using stored steering directions.
+    // remove_indexes[i] = seam column index in row i.
+    int j = best_top_col;
+    for (int i = 0; i < h; ++i) {
+        remove_indexes[i] = j;
+        if (i + 1 < h) {
+            j += steering[i * w + j];
+            if (j < 0) j = 0;
+            if (j >= w) j = w - 1;
+        }
+    }
+
+    free(cumulative);
+    free(steering);
+}
+
+void remove_seams(unsigned char *image_out, const unsigned char *image_in, int in_w, int h, int cpp, int rows_per_chunk, const int *remove_indexes)
+{
+    if (in_w <= 1 || h <= 0 || cpp <= 0 || remove_indexes == NULL) {
+        return;
+    }
+    const int out_w = in_w - 1;
+
+    // Remove one vertical seam per row.
+    // Read from input rows with stride in_w and write compact output rows with stride out_w.
+    // This keeps the next iteration's memory layout consistent with active width.
+    #pragma omp parallel for schedule(static, rows_per_chunk)
+    for (int i = 0; i < h; ++i) {
+        int s = remove_indexes[i];
+
+        if (s < 0) s = 0;
+        if (s >= in_w) s = in_w - 1;
+
+        for (int col = 0; col < out_w; ++col) {
+            int src_col = (col < s) ? col : (col + 1);
+            int src = (i * in_w + src_col) * cpp;
+            int dst = (i * out_w + col) * cpp;
+            for (int ch = 0; ch < cpp; ++ch) {
+                image_out[dst + ch] = image_in[src + ch];
+            }
+        }
+    }
+}
+
 int main(int argc, char *argv[])
 {
 
     if (argc < 3)
     {
-        printf("USAGE: sample input_image output_image\n");
+        printf("USAGE: carving input_image output_image [--seam_number N]\n");
         exit(EXIT_FAILURE);
     }
 
     char image_in_name[MAX_FILENAME];
     char image_out_name[MAX_FILENAME];
+    int seam_number = 1;
 
     snprintf(image_in_name, MAX_FILENAME, "%s", argv[1]);
     snprintf(image_out_name, MAX_FILENAME, "%s", argv[2]);
 
+    for (int argi = 3; argi < argc; ++argi) {
+        if (!strcmp(argv[argi], "--seam_number")) {
+            if (argi + 1 >= argc) {
+                printf("Error: Missing value for --seam_number\n");
+                exit(EXIT_FAILURE);
+            }
+            seam_number = atoi(argv[++argi]);
+            if (seam_number < 1) {
+                printf("Error: --seam_number must be >= 1\n");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            printf("Error: Unknown option %s\n", argv[argi]);
+            printf("USAGE: carving input_image output_image [--seam_number N]\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
     // Load image from file and allocate space for the output image
     int w, h, cpp;
-    unsigned char *image_in = stbi_load(image_in_name, &w, &h, &cpp, COLOR_CHANNELS);
+    unsigned char *image_loaded = stbi_load(image_in_name, &w, &h, &cpp, COLOR_CHANNELS);
 
-    if (image_in == NULL)
+    if (image_loaded == NULL)
     {
         printf("Error reading loading image %s!\n", image_in_name);
         exit(EXIT_FAILURE);
     }
     printf("Loaded image %s of size %dx%d with %d channels.\n", image_in_name, w, h, cpp);
     const size_t datasize = w * h * cpp * sizeof(unsigned char);
-    unsigned char *image_out = (unsigned char *)malloc(datasize);
-    if (image_out == NULL) {
-        printf("Error: Failed to allocate memory for output image!\n");
-        stbi_image_free(image_in);
+    unsigned char *image_a = (unsigned char *)malloc(datasize);
+    unsigned char *image_b = (unsigned char *)malloc(datasize);
+    unsigned char *image_energy = (unsigned char *)malloc(datasize);
+    int *remove_indexes = (int *)malloc((size_t)h * sizeof(int));
+    if (image_a == NULL || image_b == NULL || image_energy == NULL || remove_indexes == NULL) {
+        printf("Error: Failed to allocate memory for seam carving buffers!\n");
+        stbi_image_free(image_loaded);
+        free(image_a);
+        free(image_b);
+        free(image_energy);
+        free(remove_indexes);
         exit(EXIT_FAILURE);
     }
 
     // Copy the input image into output and mesure execution time
-    // double start = omp_get_wtime();
     // copy_image(image_out, image_in, datasize);
-    // double stop = omp_get_wtime();
-    // printf("Time to copy: %f s\n", stop - start);
-    
-    // Calculate the energy/derivatives
-    double start = omp_get_wtime();
-    calculate_energy(image_out, image_in, w, h, cpp);
-    double stop = omp_get_wtime();
-    printf("Time to calculate energy: %f s\n", stop - start);
+    memcpy(image_a, image_loaded, datasize);
+    stbi_image_free(image_loaded);
+
+    if (seam_number > w - 1) {
+        seam_number = w - 1;
+        printf("Adjusted seam count to %d (maximum possible for width %d).\n", seam_number, w);
+    }
+
+    unsigned char *current_in = image_a;
+    unsigned char *current_out = image_b;
+    int active_w = w;
+
+    for (int iter = 0; iter < seam_number; ++iter) {
+        // Estimate chunk size from current active width and target cache budget.
+        size_t row_bytes = (size_t)active_w * (size_t)cpp;
+        size_t target_cache = (size_t)(0.6 * 512 * 1024);
+        int rows_per_chunk = (int)(target_cache / (4 * row_bytes));
+        if (rows_per_chunk < 1) rows_per_chunk = 1;
+
+        // Calculate energy using current logical width.
+        double start_energy = omp_get_wtime();
+        calculate_energy(image_energy, current_in, active_w, h, cpp, rows_per_chunk);
+        double stop_energy = omp_get_wtime();
+
+        // Calculate seam on the same logical width.
+        double start_seamCarving = omp_get_wtime();
+        seam_carving_dynamic(image_energy, active_w, h, cpp, rows_per_chunk, remove_indexes);
+        double stop_seamCarving = omp_get_wtime();
+
+        // Remove one seam: read in width active_w, write compact rows of width active_w-1.
+        double start_seamRemoval = omp_get_wtime();
+        remove_seams(current_out, current_in, active_w, h, cpp, rows_per_chunk, remove_indexes);
+        double stop_seamRemoval = omp_get_wtime();
+        printf(
+            "Iter %d/%d | energy=%f s seam=%f s remove=%f s\n",
+            iter + 1,
+            seam_number,
+            stop_energy - start_energy,
+            stop_seamCarving - start_seamCarving,
+            stop_seamRemoval - start_seamRemoval
+        );
+
+        unsigned char *tmp = current_in;
+        current_in = current_out;
+        current_out = tmp;
+        active_w--;
+    }
 
     // Write the output image to file
     char image_out_name_temp[MAX_FILENAME];
@@ -211,24 +400,37 @@ int main(int argc, char *argv[])
     const char *file_type = strrchr(image_out_name, '.');
     if (file_type == NULL) {
         printf("Error: No file extension found!\n");
-        stbi_image_free(image_in);
-        stbi_image_free(image_out);
+        free(image_a);
+        free(image_b);
+        free(image_energy);
+        free(remove_indexes);
         exit(EXIT_FAILURE);
-    }
+    }   
     file_type++; // skip the dot
 
     if (!strcmp(file_type, "png"))
-        stbi_write_png(image_out_name, w, h, cpp, image_out, w * cpp);
+        stbi_write_png(image_out_name, active_w, h, cpp, current_in, active_w * cpp);
     else if (!strcmp(file_type, "jpg"))
-        stbi_write_jpg(image_out_name, w, h, cpp, image_out, 100);
+        stbi_write_jpg(image_out_name, active_w, h, cpp, current_in, 100);
     else if (!strcmp(file_type, "bmp"))
-        stbi_write_bmp(image_out_name, w, h, cpp, image_out);
+        stbi_write_bmp(image_out_name, active_w, h, cpp, current_in);
     else
         printf("Error: Unknown image format %s! Only png, jpg, or bmp supported.\n", file_type);
 
+    int out_w = 0, out_h = 0, out_cpp = 0;
+    unsigned char *verify_image = stbi_load(image_out_name, &out_w, &out_h, &out_cpp, 0);
+    if (verify_image != NULL) {
+        printf("Seam carving completed. Output file dimensions: %dx%d with %d channels\n", out_w, out_h, out_cpp);
+        stbi_image_free(verify_image);
+    } else {
+        printf("Seam carving completed, but failed to re-open output file for dimension check: %s\n", image_out_name);
+    }
+
     // Release the memory
-    stbi_image_free(image_in);
-    stbi_image_free(image_out);
+    free(image_a);
+    free(image_b);
+    free(image_energy);
+    free(remove_indexes);
 
     return 0;
 }
