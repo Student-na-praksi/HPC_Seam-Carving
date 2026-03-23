@@ -18,7 +18,8 @@
 
 typedef enum {
     MODE_DYNAMIC = 0,
-    MODE_GREEDY = 1
+    MODE_GREEDY = 1,
+    MODE_TRIANGLE = 2
 } seam_mode_t;
 
 void copy_image(unsigned char *image_out, const unsigned char *image_in, const size_t size)
@@ -173,6 +174,29 @@ void calculate_energy(unsigned char *image_out, const unsigned char *image_in, i
     #undef STORE_ENERGY
     #undef PIX
     #undef CLP
+}
+
+void cumulative_energy_update_cell(const unsigned char *image_in, int *cumulative, signed char *steering, int i, int j, int w, int cpp) {
+    int best_col = j;
+        int best = cumulative[(i + 1) * w + j];
+
+        if (j > 0) {
+            int left = cumulative[(i + 1) * w + (j - 1)];
+            if (left < best) {
+                best = left;
+                best_col = j - 1;
+            }
+        }
+        if (j + 1 < w) {
+            int right = cumulative[(i + 1) * w + (j + 1)];
+            if (right < best) {
+                best = right;
+                best_col = j + 1;
+            }
+        }
+
+        cumulative[i * w + j] = (int)image_in[(i * w + j) * cpp + 0] + best;
+        steering[i * w + j] = (signed char)(best_col - j);
 }
 
 void seam_carving_dynamic(const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk, int *remove_indexes)
@@ -367,6 +391,90 @@ int seam_carving_greedy(const unsigned char *image_in, int w, int h, int cpp, in
     free(candidate_scores);
     free(order);
     return accepted;
+}
+
+void seam_carving_triangle(const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk, int *remove_indexes, int strip_height)
+{
+    int *cumulative = (int *)malloc((size_t)w * (size_t)h * sizeof(int));
+    signed char *steering = (signed char *)malloc((size_t)w * (size_t)h * sizeof(signed char));
+
+    #pragma omp parallel for schedule(static)
+    for(int j = 0; j < w; ++j) {
+        cumulative[(h - 1) * w + j] = image_in[((h - 1) * w + j) * cpp + 0];
+        steering[(h - 1) * w + j] = 0;
+    }
+
+    #pragma omp parallel
+    for(int strip_bottom = h - 2; strip_bottom >= 0; strip_bottom -= strip_height) {
+        int strip_top = strip_bottom - strip_height + 1;
+        if (strip_top < 0) strip_top = 0;
+        int current_strip_height = strip_bottom - strip_top + 1;
+
+        // We calculate the up-facing triangles
+        #pragma omp for schedule(static)
+        for(int col = current_strip_height - 1; col < w + current_strip_height; col += 2 * current_strip_height ) {
+            for(int i = strip_bottom; i >= strip_top; --i) {
+                int triangle_span = i - strip_top;
+                int row_start = col - triangle_span;
+                int row_end = col + triangle_span;
+                
+                if (row_start < 0) row_start = 0;
+                if (row_end >= w) row_end = w - 1;
+                if (row_start > row_end) continue;
+
+                for (int j = row_start; j <= row_end; ++j) {
+                    cumulative_energy_update_cell(image_in, cumulative, steering, i, j, w, cpp);
+                }
+            }
+        }
+
+        // Wait for all threads to calculate up-facing triangles
+        #pragma omp barrier
+
+        // We calculate the down-facing triangles
+        #pragma omp for schedule(static)
+        for(int col = -1; col < w + current_strip_height; col += 2 * current_strip_height) {
+            for(int i = strip_bottom; i >= strip_top; --i) {
+                int triangle_span = strip_bottom - i;
+                int row_start = col - triangle_span;
+                int row_end = col + triangle_span;
+
+                if (row_start < 0) row_start = 0;
+                if (row_end >= w) row_end = w - 1;
+                if (row_start > row_end) continue;
+
+                for(int j = row_start; j <= row_end; ++j) {
+                    cumulative_energy_update_cell(image_in, cumulative, steering, i, j, w, cpp);
+                }
+            }
+        }
+
+        #pragma omp barrier
+    }
+
+    int best_top_col = 0;
+    int best_top_energy = cumulative[0];
+
+    for (int j = 1; j < w; ++j) {
+        int val = cumulative[j];
+        if (val < best_top_energy) {
+            best_top_energy = val;
+            best_top_col = j;
+        }
+    }
+
+    int j = best_top_col;
+    for (int i = 0; i < h; ++i) {
+        remove_indexes[i] = j;
+        if (i + 1 < h) {
+            j += steering[i * w + j];
+            if (j < 0) j = 0;
+            if (j >= w) j = w - 1;
+        }
+    }
+
+    free(cumulative);
+    free(steering);
 }
 
 void remove_seams(unsigned char *image_out, const unsigned char *image_in, int in_w, int h, int cpp, int rows_per_chunk, const int *remove_indexes)
@@ -594,12 +702,57 @@ static void run_greedy_mode(
     free(remove_indexes);
 }
 
+static void run_triangle_mode(
+    unsigned char **current_in,
+    unsigned char **current_out,
+    unsigned char *image_energy,
+    int h,
+    int cpp,
+    int seam_number,
+    int *active_w,
+    int strip_height)
+{
+    int *remove_indexes = (int *)malloc((size_t)h * sizeof(int));
+
+    for (int iter = 0; iter < seam_number; ++iter) {
+        int rows_per_chunk = estimate_rows_per_chunk(*active_w, cpp);
+
+        double start_energy = omp_get_wtime();
+        calculate_energy(image_energy, *current_in, *active_w, h, cpp, rows_per_chunk);
+        double stop_energy = omp_get_wtime();
+
+        double start_seamCarving = omp_get_wtime();
+        seam_carving_triangle(image_energy, *active_w, h, cpp, rows_per_chunk, remove_indexes, strip_height);
+        double stop_seamCarving = omp_get_wtime();
+
+        double start_seamRemoval = omp_get_wtime();
+        remove_seams(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes);
+        double stop_seamRemoval = omp_get_wtime();
+
+        printf(
+            "Iter %d/%d | mode=triangle | energy=%f s seam=%f s remove=%f s\n",
+            iter + 1,
+            seam_number,
+            stop_energy - start_energy,
+            stop_seamCarving - start_seamCarving,
+            stop_seamRemoval - start_seamRemoval
+        );
+
+        unsigned char *tmp = *current_in;
+        *current_in = *current_out;
+        *current_out = tmp;
+        (*active_w)--;
+    }
+
+    free(remove_indexes);
+}
+
 int main(int argc, char *argv[])
 {
 
     if (argc < 3)
     {
-        printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy] [--batch_size K]\n");
+        printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy|triangle] [--batch_size K] [--strip_height SH]\n");
         exit(EXIT_FAILURE);
     }
 
@@ -608,7 +761,7 @@ int main(int argc, char *argv[])
     int seam_number = 1;
     seam_mode_t mode = MODE_DYNAMIC;
     int batch_size = 1;
-
+    int strip_height = 16;
     snprintf(image_in_name, MAX_FILENAME, "%s", argv[1]);
     snprintf(image_out_name, MAX_FILENAME, "%s", argv[2]);
 
@@ -633,8 +786,10 @@ int main(int argc, char *argv[])
                 mode = MODE_DYNAMIC;
             } else if (!strcmp(mode_arg, "greedy")) {
                 mode = MODE_GREEDY;
+            } else if (!strcmp(mode_arg, "triangle")) {
+                mode = MODE_TRIANGLE;
             } else {
-                printf("Error: Unknown mode %s (expected dynamic|greedy)\n", mode_arg);
+                printf("Error: Unknown mode %s (expected dynamic|greedy|triangle)\n", mode_arg);
                 exit(EXIT_FAILURE);
             }
         } else if (!strcmp(argv[argi], "--batch_size")) {
@@ -647,9 +802,19 @@ int main(int argc, char *argv[])
                 printf("Error: --batch_size must be >= 1\n");
                 exit(EXIT_FAILURE);
             }
+        } else if (!strcmp(argv[argi], "--strip_height")) {
+            if (argi + 1 >= argc) {
+                printf("Error: Missing value for --strip_height\n");
+                exit(EXIT_FAILURE);
+            }
+            strip_height = atoi(argv[++argi]);
+            if (strip_height < 1) {
+                printf("Error: --strip_height must be >= 1\n");
+                exit(EXIT_FAILURE);
+            }
         } else {
             printf("Error: Unknown option %s\n", argv[argi]);
-            printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy] [--batch_size K]\n");
+            printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy|triangle] [--batch_size K] [--strip_height SH]\n");
             exit(EXIT_FAILURE);
         }
     }
@@ -692,26 +857,11 @@ int main(int argc, char *argv[])
     int active_w = w;
 
     if (mode == MODE_GREEDY) {
-        run_greedy_mode(
-            &current_in,
-            &current_out,
-            image_energy,
-            h,
-            cpp,
-            seam_number,
-            batch_size,
-            &active_w
-        );
+        run_greedy_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, batch_size, &active_w);
+    } else if(mode == MODE_TRIANGLE) {
+        run_triangle_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, &active_w, strip_height);
     } else {
-        run_dynamic_mode(
-            &current_in,
-            &current_out,
-            image_energy,
-            h,
-            cpp,
-            seam_number,
-            &active_w
-        );
+        run_dynamic_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, &active_w);
     }
 
     // Write the output image to file
