@@ -16,6 +16,11 @@
 #define COLOR_CHANNELS 0
 #define MAX_FILENAME 255
 
+typedef enum {
+    MODE_DYNAMIC = 0,
+    MODE_GREEDY = 1
+} seam_mode_t;
+
 void copy_image(unsigned char *image_out, const unsigned char *image_in, const size_t size)
 {
     
@@ -256,6 +261,114 @@ void seam_carving_dynamic(const unsigned char *image_in, int w, int h, int cpp, 
     free(steering);
 }
 
+int seam_carving_greedy(const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk, int *remove_indexes, int k_remove)
+{
+    (void)rows_per_chunk;
+
+    if (w <= 1 || h <= 0 || cpp <= 0 || remove_indexes == NULL || k_remove <= 0) {
+        return 0;
+    }
+
+    if (k_remove > w - 1) {
+        k_remove = w - 1;
+    }
+
+    int *candidate_paths = (int *)malloc((size_t)w * (size_t)h * sizeof(int));
+    int *candidate_scores = (int *)malloc((size_t)w * sizeof(int));
+    int *order = (int *)malloc((size_t)w * sizeof(int));
+
+    // Builds one greedy seam candidate per top-row column in parallel.
+    #pragma omp parallel for schedule(static)
+    for (int start_col = 0; start_col < w; ++start_col) {
+        int j = start_col;
+        int score = (int)image_in[j * cpp + 0];
+        candidate_paths[start_col * h + 0] = j;
+
+        for (int i = 1; i < h; ++i) {
+            int best_j = j;
+            int best_e = (int)image_in[(i * w + j) * cpp + 0];
+
+            if (j > 0) {
+                int e_left = (int)image_in[(i * w + (j - 1)) * cpp + 0];
+                if (e_left < best_e) {
+                    best_e = e_left;
+                    best_j = j - 1;
+                }
+            }
+            if (j + 1 < w) {
+                int e_right = (int)image_in[(i * w + (j + 1)) * cpp + 0];
+                if (e_right < best_e) {
+                    best_e = e_right;
+                    best_j = j + 1;
+                }
+            }
+
+            j = best_j;
+            candidate_paths[start_col * h + i] = j;
+            score += best_e;
+        }
+
+        candidate_scores[start_col] = score;
+    }
+
+    for (int c = 0; c < w; ++c) {
+        order[c] = c;
+    }
+
+    // Insertion sort for candidates
+    for (int i = 1; i < w; ++i) {
+        int idx = order[i];
+        int key_score = candidate_scores[idx];
+        int j = i - 1;
+        while (j >= 0 && candidate_scores[order[j]] > key_score) {
+            order[j + 1] = order[j];
+            --j;
+        }
+        order[j + 1] = idx;
+    }
+
+    int accepted = 0;
+
+    for (int oi = 0; oi < w && accepted < k_remove; ++oi) {
+        int cand_col = order[oi];
+        const int *cand_path = candidate_paths + cand_col * h;
+        int valid = 1;
+
+        for (int s = 0; s < accepted && valid; ++s) {
+            const int *acc_path = remove_indexes + s * h;
+            int relation = 0;
+
+            for (int i = 0; i < h; ++i) {
+                int d = cand_path[i] - acc_path[i];
+                if (d == 0) {
+                    valid = 0;
+                    break;
+                }
+
+                if (relation == 0) {
+                    relation = (d > 0) ? 1 : -1;
+                } else if ((relation > 0 && d < 0) || (relation < 0 && d > 0)) {
+                    // Crossing detected of seams detected
+                    valid = 0;
+                    break;
+                }
+            }
+        }
+
+        if (valid) {
+            for (int i = 0; i < h; ++i) {
+                remove_indexes[accepted * h + i] = cand_path[i];
+            }
+            accepted++;
+        }
+    }
+
+    free(candidate_paths);
+    free(candidate_scores);
+    free(order);
+    return accepted;
+}
+
 void remove_seams(unsigned char *image_out, const unsigned char *image_in, int in_w, int h, int cpp, int rows_per_chunk, const int *remove_indexes)
 {
     if (in_w <= 1 || h <= 0 || cpp <= 0 || remove_indexes == NULL) {
@@ -284,18 +397,75 @@ void remove_seams(unsigned char *image_out, const unsigned char *image_in, int i
     }
 }
 
+void remove_seams_multi(unsigned char *image_out, const unsigned char *image_in, int in_w, int h, int cpp, int rows_per_chunk, const int *remove_indexes, int seam_count)
+{
+    if (in_w <= 1 || h <= 0 || cpp <= 0 || remove_indexes == NULL || seam_count <= 0) {
+        return;
+    }
+
+    if (seam_count > in_w - 1) {
+        seam_count = in_w - 1;
+    }
+
+    const int out_w = in_w - seam_count;
+
+    #pragma omp parallel for schedule(static, rows_per_chunk)
+    for (int i = 0; i < h; ++i) {
+        int *row_seams = (int *)malloc((size_t)seam_count * sizeof(int));
+
+        for (int s = 0; s < seam_count; ++s) {
+            int col = remove_indexes[s * h + i];
+            // if (col < 0) col = 0;
+            // if (col >= in_w) col = in_w - 1;
+            row_seams[s] = col;
+        }
+
+        // Insertion sort so that the removal is from left to right
+        for (int a = 1; a < seam_count; ++a) {
+            int key = row_seams[a];
+            int b = a - 1;
+            while (b >= 0 && row_seams[b] > key) {
+                row_seams[b + 1] = row_seams[b];
+                --b;
+            }
+            row_seams[b + 1] = key;
+        }
+
+        int skip_idx = 0;
+        int out_col = 0;
+
+        for (int in_col = 0; in_col < in_w; ++in_col) {
+            if (skip_idx < seam_count && in_col == row_seams[skip_idx]) {
+                skip_idx++;
+                continue;
+            }
+
+            int src = (i * in_w + in_col) * cpp;
+            int dst = (i * out_w + out_col) * cpp;
+            for (int ch = 0; ch < cpp; ++ch) {
+                image_out[dst + ch] = image_in[src + ch];
+            }
+            out_col++;
+        }
+
+        free(row_seams);
+    }
+}
+
 int main(int argc, char *argv[])
 {
 
     if (argc < 3)
     {
-        printf("USAGE: carving input_image output_image [--seam_number N]\n");
+        printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy] [--batch_size K]\n");
         exit(EXIT_FAILURE);
     }
 
     char image_in_name[MAX_FILENAME];
     char image_out_name[MAX_FILENAME];
     int seam_number = 1;
+    seam_mode_t mode = MODE_DYNAMIC;
+    int batch_size = 1;
 
     snprintf(image_in_name, MAX_FILENAME, "%s", argv[1]);
     snprintf(image_out_name, MAX_FILENAME, "%s", argv[2]);
@@ -311,9 +481,33 @@ int main(int argc, char *argv[])
                 printf("Error: --seam_number must be >= 1\n");
                 exit(EXIT_FAILURE);
             }
+        } else if (!strcmp(argv[argi], "--mode")) {
+            if (argi + 1 >= argc) {
+                printf("Error: Missing value for --mode\n");
+                exit(EXIT_FAILURE);
+            }
+            const char *mode_arg = argv[++argi];
+            if (!strcmp(mode_arg, "dynamic")) {
+                mode = MODE_DYNAMIC;
+            } else if (!strcmp(mode_arg, "greedy")) {
+                mode = MODE_GREEDY;
+            } else {
+                printf("Error: Unknown mode %s (expected dynamic|greedy)\n", mode_arg);
+                exit(EXIT_FAILURE);
+            }
+        } else if (!strcmp(argv[argi], "--batch_size")) {
+            if (argi + 1 >= argc) {
+                printf("Error: Missing value for --batch_size\n");
+                exit(EXIT_FAILURE);
+            }
+            batch_size = atoi(argv[++argi]);
+            if (batch_size < 1) {
+                printf("Error: --batch_size must be >= 1\n");
+                exit(EXIT_FAILURE);
+            }
         } else {
             printf("Error: Unknown option %s\n", argv[argi]);
-            printf("USAGE: carving input_image output_image [--seam_number N]\n");
+            printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy] [--batch_size K]\n");
             exit(EXIT_FAILURE);
         }
     }
