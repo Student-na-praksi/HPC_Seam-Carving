@@ -452,6 +452,148 @@ void remove_seams_multi(unsigned char *image_out, const unsigned char *image_in,
     }
 }
 
+static int estimate_rows_per_chunk(int active_w, int cpp)
+{
+    size_t row_bytes = (size_t)active_w * (size_t)cpp;
+    size_t target_cache = (size_t)(0.6 * 512 * 1024);
+    int rows_per_chunk = (int)(target_cache / (4 * row_bytes));
+    if (rows_per_chunk < 1) rows_per_chunk = 1;
+    return rows_per_chunk;
+}
+
+static void run_dynamic_mode(
+    unsigned char **current_in,
+    unsigned char **current_out,
+    unsigned char *image_energy,
+    int h,
+    int cpp,
+    int seam_number,
+    int *active_w)
+{
+    int *remove_indexes = (int *)malloc((size_t)h * sizeof(int));
+    if (remove_indexes == NULL) {
+        printf("Error: Failed to allocate dynamic seam index buffer!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int iter = 0; iter < seam_number; ++iter) {
+        int rows_per_chunk = estimate_rows_per_chunk(*active_w, cpp);
+
+        double start_energy = omp_get_wtime();
+        calculate_energy(image_energy, *current_in, *active_w, h, cpp, rows_per_chunk);
+        double stop_energy = omp_get_wtime();
+
+        double start_seamCarving = omp_get_wtime();
+        seam_carving_dynamic(image_energy, *active_w, h, cpp, rows_per_chunk, remove_indexes);
+        double stop_seamCarving = omp_get_wtime();
+
+        double start_seamRemoval = omp_get_wtime();
+        remove_seams(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes);
+        double stop_seamRemoval = omp_get_wtime();
+
+        printf(
+            "Iter %d/%d | mode=dynamic | energy=%f s seam=%f s remove=%f s\n",
+            iter + 1,
+            seam_number,
+            stop_energy - start_energy,
+            stop_seamCarving - start_seamCarving,
+            stop_seamRemoval - start_seamRemoval
+        );
+
+        unsigned char *tmp = *current_in;
+        *current_in = *current_out;
+        *current_out = tmp;
+        (*active_w)--;
+    }
+
+    free(remove_indexes);
+}
+
+static void run_greedy_mode(
+    unsigned char **current_in,
+    unsigned char **current_out,
+    unsigned char *image_energy,
+    int h,
+    int cpp,
+    int seam_number,
+    int batch_size,
+    int *active_w)
+{
+    if (batch_size < 1) {
+        batch_size = 1;
+    }
+
+    int *remove_indexes = (int *)malloc((size_t)h * (size_t)batch_size * sizeof(int));
+    if (remove_indexes == NULL) {
+        printf("Error: Failed to allocate greedy seam index buffer!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    int removed_total = 0;
+    int iter = 0;
+
+    while (removed_total < seam_number) {
+        iter++;
+        int rows_per_chunk = estimate_rows_per_chunk(*active_w, cpp);
+
+        int seams_this_iter = batch_size;
+        int remaining = seam_number - removed_total;
+        if (seams_this_iter > remaining) seams_this_iter = remaining;
+        if (seams_this_iter > *active_w - 1) seams_this_iter = *active_w - 1;
+        if (seams_this_iter < 1) seams_this_iter = 1;
+
+        double start_energy = omp_get_wtime();
+        calculate_energy(image_energy, *current_in, *active_w, h, cpp, rows_per_chunk);
+        double stop_energy = omp_get_wtime();
+
+        double start_seamCarving = omp_get_wtime();
+        int selected_seams = seam_carving_greedy(
+            image_energy,
+            *active_w,
+            h,
+            cpp,
+            rows_per_chunk,
+            remove_indexes,
+            seams_this_iter
+        );
+        if (selected_seams < 1) selected_seams = 1;
+        if (selected_seams > *active_w - 1) selected_seams = *active_w - 1;
+        double stop_seamCarving = omp_get_wtime();
+
+        double start_seamRemoval = omp_get_wtime();
+        remove_seams_multi(
+            *current_out,
+            *current_in,
+            *active_w,
+            h,
+            cpp,
+            rows_per_chunk,
+            remove_indexes,
+            selected_seams
+        );
+        double stop_seamRemoval = omp_get_wtime();
+
+        printf(
+            "Iter %d | mode=greedy | removed=%d (total=%d/%d) | energy=%f s seam=%f s remove=%f s\n",
+            iter,
+            selected_seams,
+            removed_total + selected_seams,
+            seam_number,
+            stop_energy - start_energy,
+            stop_seamCarving - start_seamCarving,
+            stop_seamRemoval - start_seamRemoval
+        );
+
+        unsigned char *tmp = *current_in;
+        *current_in = *current_out;
+        *current_out = tmp;
+        *active_w -= selected_seams;
+        removed_total += selected_seams;
+    }
+
+    free(remove_indexes);
+}
+
 int main(int argc, char *argv[])
 {
 
@@ -526,14 +668,12 @@ int main(int argc, char *argv[])
     unsigned char *image_a = (unsigned char *)malloc(datasize);
     unsigned char *image_b = (unsigned char *)malloc(datasize);
     unsigned char *image_energy = (unsigned char *)malloc(datasize);
-    int *remove_indexes = (int *)malloc((size_t)h * sizeof(int));
-    if (image_a == NULL || image_b == NULL || image_energy == NULL || remove_indexes == NULL) {
+    if (image_a == NULL || image_b == NULL || image_energy == NULL) {
         printf("Error: Failed to allocate memory for seam carving buffers!\n");
         stbi_image_free(image_loaded);
         free(image_a);
         free(image_b);
         free(image_energy);
-        free(remove_indexes);
         exit(EXIT_FAILURE);
     }
 
@@ -551,53 +691,36 @@ int main(int argc, char *argv[])
     unsigned char *current_out = image_b;
     int active_w = w;
 
-    for (int iter = 0; iter < seam_number; ++iter) {
-        // Estimate chunk size from current active width and target cache budget.
-        size_t row_bytes = (size_t)active_w * (size_t)cpp;
-        size_t target_cache = (size_t)(0.6 * 512 * 1024);
-        int rows_per_chunk = (int)(target_cache / (4 * row_bytes));
-        if (rows_per_chunk < 1) rows_per_chunk = 1;
-
-        // Calculate energy using current logical width.
-        double start_energy = omp_get_wtime();
-        calculate_energy(image_energy, current_in, active_w, h, cpp, rows_per_chunk);
-        double stop_energy = omp_get_wtime();
-
-        // Calculate seam on the same logical width.
-        double start_seamCarving = omp_get_wtime();
-        seam_carving_dynamic(image_energy, active_w, h, cpp, rows_per_chunk, remove_indexes);
-        double stop_seamCarving = omp_get_wtime();
-
-        // Remove one seam: read in width active_w, write compact rows of width active_w-1.
-        double start_seamRemoval = omp_get_wtime();
-        remove_seams(current_out, current_in, active_w, h, cpp, rows_per_chunk, remove_indexes);
-        double stop_seamRemoval = omp_get_wtime();
-        printf(
-            "Iter %d/%d | energy=%f s seam=%f s remove=%f s\n",
-            iter + 1,
+    if (mode == MODE_GREEDY) {
+        run_greedy_mode(
+            &current_in,
+            &current_out,
+            image_energy,
+            h,
+            cpp,
             seam_number,
-            stop_energy - start_energy,
-            stop_seamCarving - start_seamCarving,
-            stop_seamRemoval - start_seamRemoval
+            batch_size,
+            &active_w
         );
-
-        unsigned char *tmp = current_in;
-        current_in = current_out;
-        current_out = tmp;
-        active_w--;
+    } else {
+        run_dynamic_mode(
+            &current_in,
+            &current_out,
+            image_energy,
+            h,
+            cpp,
+            seam_number,
+            &active_w
+        );
     }
 
     // Write the output image to file
-    char image_out_name_temp[MAX_FILENAME];
-    strncpy(image_out_name_temp, image_out_name, MAX_FILENAME);
-
     const char *file_type = strrchr(image_out_name, '.');
     if (file_type == NULL) {
         printf("Error: No file extension found!\n");
         free(image_a);
         free(image_b);
         free(image_energy);
-        free(remove_indexes);
         exit(EXIT_FAILURE);
     }   
     file_type++; // skip the dot
@@ -624,7 +747,6 @@ int main(int argc, char *argv[])
     free(image_a);
     free(image_b);
     free(image_energy);
-    free(remove_indexes);
 
     return 0;
 }
