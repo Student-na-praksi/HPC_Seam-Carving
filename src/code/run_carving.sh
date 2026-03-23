@@ -5,6 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --output=carving_out.log
+#SBATCH -e ./logs/seam-carving-err-%J.log
 #SBATCH --hint=nomultithread
 
 # Set OpenMP environment variables for thread placement and binding    
@@ -20,7 +21,8 @@ gcc -O3 -lm -lnuma --openmp carving.c -o carving
 
 # Run
 # srun  carving ../test_images/720x480.png 720x480-out.png --seam_number 80
-srun  carving ../test_images/3840x2160.png 3840x2160-out.png --seam_number 128
+# srun  carving ../test_images/3840x2160.png 3840x2160-out.png --seam_number 128 --mode dynamic
+srun carving ../test_images/3840x2160.png 3840x2160-out.png --seam_number 512 --mode greedy --batch_size 8
 #srun  carving valve.png valve-out.png --seam_number 80
 
 # MONITOR SQUEUE every 2 seconds
