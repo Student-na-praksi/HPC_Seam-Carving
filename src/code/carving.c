@@ -520,8 +520,6 @@ void remove_seams_multi(unsigned char *image_out, const unsigned char *image_in,
 
         for (int s = 0; s < seam_count; ++s) {
             int col = remove_indexes[s * h + i];
-            // if (col < 0) col = 0;
-            // if (col >= in_w) col = in_w - 1;
             row_seams[s] = col;
         }
 
@@ -576,10 +574,6 @@ static void run_dynamic_mode(
     int *active_w)
 {
     int *remove_indexes = (int *)malloc((size_t)h * sizeof(int));
-    if (remove_indexes == NULL) {
-        printf("Error: Failed to allocate dynamic seam index buffer!\n");
-        exit(EXIT_FAILURE);
-    }
 
     for (int iter = 0; iter < seam_number; ++iter) {
         int rows_per_chunk = estimate_rows_per_chunk(*active_w, cpp);
@@ -596,8 +590,6 @@ static void run_dynamic_mode(
         remove_seams(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes);
         double stop_seamRemoval = omp_get_wtime();
 
-        printf("Iter %d/%d | mode=dynamic | energy=%f s seam=%f s remove=%f s\n", iter + 1, seam_number, stop_energy - start_energy, stop_seamCarving - start_seamCarving, stop_seamRemoval - start_seamRemoval);
-
         unsigned char *tmp = *current_in;
         *current_in = *current_out;
         *current_out = tmp;
@@ -607,15 +599,7 @@ static void run_dynamic_mode(
     free(remove_indexes);
 }
 
-static void run_greedy_mode(
-    unsigned char **current_in,
-    unsigned char **current_out,
-    unsigned char *image_energy,
-    int h,
-    int cpp,
-    int seam_number,
-    int batch_size,
-    int *active_w)
+static void run_greedy_mode(unsigned char **current_in, unsigned char **current_out, unsigned char *image_energy, int h, int cpp, int seam_number, int batch_size, int *active_w)
 {
     if (batch_size < 1) {
         batch_size = 1;
@@ -636,19 +620,13 @@ static void run_greedy_mode(
         if (seams_this_iter > *active_w - 1) seams_this_iter = *active_w - 1;
         if (seams_this_iter < 1) seams_this_iter = 1;
 
-        double start_energy = omp_get_wtime();
         calculate_energy(image_energy, *current_in, *active_w, h, cpp, rows_per_chunk);
-        double stop_energy = omp_get_wtime();
 
-        double start_seamCarving = omp_get_wtime();
         int selected_seams = seam_carving_greedy(image_energy, *active_w, h, cpp, rows_per_chunk, remove_indexes, seams_this_iter);
         if (selected_seams < 1) selected_seams = 1;
         if (selected_seams > *active_w - 1) selected_seams = *active_w - 1;
-        double stop_seamCarving = omp_get_wtime();
 
-        double start_seamRemoval = omp_get_wtime();
         remove_seams_multi(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes, selected_seams);
-        double stop_seamRemoval = omp_get_wtime();
 
         unsigned char *tmp = *current_in;
         *current_in = *current_out;
@@ -660,32 +638,18 @@ static void run_greedy_mode(
     free(remove_indexes);
 }
 
-static void run_triangle_mode(
-    unsigned char **current_in,
-    unsigned char **current_out,
-    unsigned char *image_energy,
-    int h,
-    int cpp,
-    int seam_number,
-    int *active_w,
-    int strip_height)
+static void run_triangle_mode(unsigned char **current_in, unsigned char **current_out, unsigned char *image_energy, int h, int cpp, int seam_number, int *active_w, int strip_height)
 {
     int *remove_indexes = (int *)malloc((size_t)h * sizeof(int));
 
     for (int iter = 0; iter < seam_number; ++iter) {
         int rows_per_chunk = estimate_rows_per_chunk(*active_w, cpp);
 
-        double start_energy = omp_get_wtime();
         calculate_energy(image_energy, *current_in, *active_w, h, cpp, rows_per_chunk);
-        double stop_energy = omp_get_wtime();
 
-        double start_seamCarving = omp_get_wtime();
         seam_carving_triangle(image_energy, *active_w, h, cpp, rows_per_chunk, remove_indexes, strip_height);
-        double stop_seamCarving = omp_get_wtime();
 
-        double start_seamRemoval = omp_get_wtime();
         remove_seams(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes);
-        double stop_seamRemoval = omp_get_wtime();
 
         unsigned char *tmp = *current_in;
         *current_in = *current_out;
