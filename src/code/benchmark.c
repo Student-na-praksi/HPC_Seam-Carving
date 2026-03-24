@@ -521,7 +521,7 @@ int main(void)
     const char *images_dir = "../test_images";
     const int seam_number = 32;
     const int thread_max = omp_get_num_procs();
-    const int strip_height = 16;
+    const int strip_height = 32;
 
     // Dynamic thread experiment (optional)
     // run_dynamic_thread_experiment(images_dir, seam_number, 1, thread_max, 1, "dynamic_thread_experiment.csv");

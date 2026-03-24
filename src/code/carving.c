@@ -430,9 +430,6 @@ void seam_carving_triangle(const unsigned char *image_in, int w, int h, int cpp,
             }
         }
 
-        // Wait for all threads to calculate up-facing triangles
-        #pragma omp barrier
-
         // We calculate the down-facing triangles
         #pragma omp for schedule(static)
         for(int col = -1; col < w + current_strip_height; col += 2 * current_strip_height) {
@@ -450,8 +447,6 @@ void seam_carving_triangle(const unsigned char *image_in, int w, int h, int cpp,
                 }
             }
         }
-
-        #pragma omp barrier
     }
 
     int best_top_col = 0;
