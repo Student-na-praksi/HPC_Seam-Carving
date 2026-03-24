@@ -14,6 +14,8 @@
 #define EXPERIMENT_SEAM_NUMBER 32
 #define EXPERIMENT_THREAD_MIN 1
 #define EXPERIMENT_THREAD_STEP 1
+#define EXPERIMENT_IMAGE_COUNT 5
+#define EXPERIMENT_ITERATION 5
 
 static const char *EXPERIMENT_IMAGE_FILES[] = {
     "720x480.png",
@@ -22,8 +24,6 @@ static const char *EXPERIMENT_IMAGE_FILES[] = {
     "3840x2160.png",
     "7680x4320.png"
 };
-
-#define EXPERIMENT_IMAGE_COUNT 5
 
 typedef struct {
     double energy;
@@ -68,7 +68,10 @@ static int run_dynamic_benchmark_once(const unsigned char *image_src, int w, int
 
         omp_set_num_threads(energy_threads);
         double start_energy = omp_get_wtime();
+        // Optimised version
         calculate_energy(image_energy, current_in, active_w, h, cpp, rows_per_chunk);
+        // Non optimised version
+        // calculate_energy_basic(image_energy, current_in, active_w, h, cpp, rows_per_chunk);
         double stop_energy = omp_get_wtime();
 
         omp_set_num_threads(seam_threads);
@@ -516,6 +519,123 @@ static int run_greedy_vs_dynamic_experiment(const char *images_dir, int seam_num
     return 1;
 }
 
+static int run_carving_many_times (const char *images_dir, int seam_number, int num_threads, const char *csv_path)
+{
+    FILE *csv = fopen(csv_path, "w");
+    if (csv == NULL) {
+        return 0;
+    }
+
+    timing_result_t global_sum = {0.0, 0.0, 0.0, 0.0};
+    int global_runs = 0;
+
+    fprintf(csv, "record,image,iteration,width,height,channels,seams,mode,batch_size,strip_height,energy_s,seam_s,remove_s,total_s\n");
+
+    for (int idx = 0; idx < EXPERIMENT_IMAGE_COUNT; ++idx) {
+        char image_path[512];
+        snprintf(image_path, sizeof(image_path), "%s/%s", images_dir, EXPERIMENT_IMAGE_FILES[idx]);
+
+        int w = 0, h = 0, cpp = 0;
+        unsigned char *loaded = stbi_load(image_path, &w, &h, &cpp, COLOR_CHANNELS);
+        if (loaded == NULL) {
+            fprintf(csv, "image_load_failed,%s,%d,%d,%d,%d,%d,dynamic,%d,%d,0.000000,0.000000,0.000000,0.000000\n", EXPERIMENT_IMAGE_FILES[idx], 0, 0, 0, 0, seam_number, 0, 0);
+            fprintf(csv, "----------------\n");
+            continue;
+        }
+
+        int seams_for_image = seam_number;
+        if (seams_for_image > w - 1) seams_for_image = w - 1;
+
+        timing_result_t image_sum = {0.0, 0.0, 0.0, 0.0};
+        int image_runs = 0;
+
+        for (int iter = 0; iter < EXPERIMENT_ITERATION; ++iter) {
+            timing_result_t tr;
+            if (!run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, num_threads, num_threads, num_threads, &tr)) {
+                continue;
+            }
+
+            image_sum.energy += tr.energy;
+            image_sum.seam += tr.seam;
+            image_sum.remove += tr.remove;
+            image_sum.total += tr.total;
+            image_runs++;
+
+            global_sum.energy += tr.energy;
+            global_sum.seam += tr.seam;
+            global_sum.remove += tr.remove;
+            global_sum.total += tr.total;
+            global_runs++;
+
+            fprintf(csv,
+                    "iteration,%s,%d,%d,%d,%d,%d,dynamic,%d,%d,%.6f,%.6f,%.6f,%.6f\n",
+                    EXPERIMENT_IMAGE_FILES[idx],
+                    iter + 1,
+                    w,
+                    h,
+                    cpp,
+                    seams_for_image,
+                    0,
+                    0,
+                    tr.energy,
+                    tr.seam,
+                    tr.remove,
+                    tr.total);
+        }
+
+        timing_result_t image_avg = {0.0, 0.0, 0.0, 0.0};
+        if (image_runs > 0) {
+            image_avg.energy = image_sum.energy / (double)image_runs;
+            image_avg.seam = image_sum.seam / (double)image_runs;
+            image_avg.remove = image_sum.remove / (double)image_runs;
+            image_avg.total = image_sum.total / (double)image_runs;
+        }
+
+        fprintf(csv,
+            "image_average,%s,%d,%d,%d,%d,%d,dynamic,%d,%d,%.6f,%.6f,%.6f,%.6f\n",
+                EXPERIMENT_IMAGE_FILES[idx],
+                0,
+                w,
+                h,
+                cpp,
+                seams_for_image,
+                0,
+                0,
+                image_avg.energy,
+                image_avg.seam,
+                image_avg.remove,
+                image_avg.total);
+
+        fprintf(csv, "----------------\n");
+
+        stbi_image_free(loaded);
+    }
+
+    timing_result_t global_avg = {0.0, 0.0, 0.0, 0.0};
+    if (global_runs > 0) {
+        global_avg.energy = global_sum.energy / (double)global_runs;
+        global_avg.seam = global_sum.seam / (double)global_runs;
+        global_avg.remove = global_sum.remove / (double)global_runs;
+        global_avg.total = global_sum.total / (double)global_runs;
+    }
+
+    fprintf(csv, "overall_average,ALL_IMAGES,%d,%d,%d,%d,%d,dynamic,%d,%d,%.6f,%.6f,%.6f,%.6f\n",
+            0,
+            0,
+            0,
+            0,
+            seam_number,
+            0,
+            0,
+            global_avg.energy,
+            global_avg.seam,
+            global_avg.remove,
+            global_avg.total);
+
+    fclose(csv);
+    return 1;
+}
+
 int main(void)
 {
     const char *images_dir = "../test_images";
@@ -532,7 +652,19 @@ int main(void)
     // run_greedy_vs_dynamic_experiment(images_dir, 512, batch_size, thread_max, comparison_csv);
 
     // Dynamic vs improved triangle
-    run_dynamic_vs_triangle_experiment(images_dir, 512, thread_max, strip_height, "triangle_vs_dynamic_comparison.csv");
+    //run_dynamic_vs_triangle_experiment(images_dir, 512, thread_max, strip_height, "triangle_vs_dynamic_comparison.csv");
+
+    // Base benchmark of running dynamic many times
+    run_carving_many_times(images_dir, 128, 2, "carving_many_times-2thread.csv");
+    run_carving_many_times(images_dir, 128, 4, "carving_many_times-4thread.csv");
+    run_carving_many_times(images_dir, 128, 8, "carving_many_times-8thread.csv");
+    run_carving_many_times(images_dir, 128, 16, "carving_many_times-16thread.csv");
+    run_carving_many_times(images_dir, 128, 32, "carving_many_times-32thread.csv");
+    run_carving_many_times(images_dir, 128, 64, "carving_many_times-64thread.csv");
+    // modified to use non optimised energy calculation
+    // run_carving_many_times(images_dir, 128, thread_max, "carving_many_times-Naive-Energy.csv");
+    // Compiled with -O2 and no OpenMP
+    // run_carving_many_times(images_dir, 128, 1, "carving_many_times-Sequential.csv");
 
     return 0;
 }

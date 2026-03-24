@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 void copy_image(unsigned char *image_out, const unsigned char *image_in, size_t size);
+void calculate_energy_basic(unsigned char *image_out, const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk);
 void calculate_energy(unsigned char *image_out, const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk);
 void seam_carving_dynamic(const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk, int *remove_indexes);
 void seam_carving_triangle(const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk, int *remove_indexes, int strip_height);

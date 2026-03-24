@@ -24,31 +24,65 @@ typedef enum {
     MODE_TRIANGLE = 2
 } seam_mode_t;
 
-void copy_image(unsigned char *image_out, const unsigned char *image_in, const size_t size)
+static inline int closest_neighbour(int value, int low, int high)
 {
-    
-    #pragma omp parallel
-    {
-        // Print thread, CPU, and NUMA node information
-        #pragma omp single
-        printf("Using %d threads.\n", omp_get_num_threads());
-
-        int tid = omp_get_thread_num();
-        int cpu = sched_getcpu();
-        int node = numa_node_of_cpu(cpu);
-
-        #pragma omp critical
-        printf("Thread %d -> CPU %d NUMA %d\n", tid, cpu, node);
-
-        // Copy the image data in parallel
-        #pragma omp for
-        for (size_t i = 0; i < size; ++i)
-        {
-            image_out[i] = image_in[i];
-        }
-    }
-    
+    if (value < low) return low;
+    if (value > high) return high;
+    return value;
 }
+
+static inline void store_energy_pixel(unsigned char *image_out, const unsigned char *image_in, int w, int cpp, int i, int j, int evalue)
+{
+    int o = ((i * w) + j) * cpp;
+    unsigned char ev = (unsigned char)evalue;
+
+    image_out[o + 0] = ev;
+    if (cpp > 1) image_out[o + 1] = ev;
+    if (cpp > 2) image_out[o + 2] = ev;
+    if (cpp > 3) image_out[o + 3] = image_in[o + 3];
+}
+
+void calculate_energy_basic(unsigned char *image_out, const unsigned char *image_in, int w, int h, int cpp, int rows_per_chunk)
+{
+    if (image_out == NULL || image_in == NULL || w <= 0 || h <= 0 || cpp <= 0) {
+        return;
+    }
+
+    const int channels_to_use = (cpp >= 3) ? 3 : 1;
+
+    #define PIX(ii, jj, ch) image_in[((ii) * w + (jj)) * cpp + (ch)]
+
+    #pragma omp parallel for // schedule(static) //, rows_per_chunk)
+    for (int idx = 0; idx < w * h; ++idx) {
+        int i = idx / w;
+        int j = idx % w;
+
+        int im = closest_neighbour(i - 1, 0, h - 1);
+        int ip = closest_neighbour(i + 1, 0, h - 1);
+        int jm = closest_neighbour(j - 1, 0, w - 1);
+        int jp = closest_neighbour(j + 1, 0, w - 1);
+
+        int e_sum = 0;
+
+        for (int ch = 0; ch < channels_to_use; ++ch) {
+            int ul = PIX(im, jm, ch), u = PIX(im, j, ch), ur = PIX(im, jp, ch);
+            int l = PIX(i, jm, ch),                         r = PIX(i, jp, ch);
+            int dl = PIX(ip, jm, ch), d = PIX(ip, j, ch), dr = PIX(ip, jp, ch);
+
+            int gx = -ul - 2 * l - dl + ur + 2 * r + dr;
+            int gy = -ul - 2 * u - ur + dl + 2 * d + dr;
+
+            e_sum += (int)sqrt((double)(gx * gx + gy * gy));
+        }
+
+        int e = e_sum / channels_to_use;
+        if (e > 255) e = 255;
+        store_energy_pixel(image_out, image_in, w, cpp, i, j, e);
+    }
+
+    #undef PIX
+}
+
 // Compute Sobel energy image from input image.
 // Output is grayscale-like (same value written to R,G,B if present).
 // For RGB images, Sobel is computed per channel and averaged.
@@ -92,7 +126,7 @@ void calculate_energy(unsigned char *image_out, const unsigned char *image_in, i
     // 1) Interior pixels: no clamp checks needed because neighbors exist on all sides.
     //    i = row index, j = column index.
     //    schedule(static, rows_per_chunk) assigns contiguous row blocks to threads.
-    #pragma omp parallel for schedule(static, rows_per_chunk)
+    #pragma omp parallel for // schedule(static) //, rows_per_chunk)
     for (int i = 1; i < h - 1; ++i) {
         const unsigned char *row_above = image_in + (i - 1) * w * cpp;
         const unsigned char *row_current = image_in + i * w * cpp;
@@ -221,7 +255,7 @@ void seam_carving_dynamic(const unsigned char *image_in, int w, int h, int cpp, 
 
     // Base case: last row has no children, so cumulative equals local energy.
     // image_in here is the energy image; channel 0 contains the scalar energy value.
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for // schedule(static)
     for (int j = 0; j < w; ++j) {
         cumulative[(h - 1) * w + j] = image_in[((h - 1) * w + j) * cpp + 0];
         steering[(h - 1) * w + j] = 0;
@@ -304,7 +338,7 @@ int seam_carving_greedy(const unsigned char *image_in, int w, int h, int cpp, in
     int *order = (int *)malloc((size_t)w * sizeof(int));
 
     // Builds one greedy seam candidate per top-row column in parallel.
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for // schedule(static)
     for (int start_col = 0; start_col < w; ++start_col) {
         int j = start_col;
         int score = (int)image_in[j * cpp + 0];
@@ -400,7 +434,7 @@ void seam_carving_triangle(const unsigned char *image_in, int w, int h, int cpp,
     int *cumulative = (int *)malloc((size_t)w * (size_t)h * sizeof(int));
     signed char *steering = (signed char *)malloc((size_t)w * (size_t)h * sizeof(signed char));
 
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for // schedule(static)
     for(int j = 0; j < w; ++j) {
         cumulative[(h - 1) * w + j] = image_in[((h - 1) * w + j) * cpp + 0];
         steering[(h - 1) * w + j] = 0;
@@ -484,7 +518,7 @@ void remove_seams(unsigned char *image_out, const unsigned char *image_in, int i
     // Remove one vertical seam per row.
     // Read from input rows with stride in_w and write compact output rows with stride out_w.
     // This keeps the next iteration's memory layout consistent with active width.
-    #pragma omp parallel for schedule(static, rows_per_chunk)
+    #pragma omp parallel for // schedule(static) //, rows_per_chunk)
     for (int i = 0; i < h; ++i) {
         int s = remove_indexes[i];
 
@@ -514,7 +548,7 @@ void remove_seams_multi(unsigned char *image_out, const unsigned char *image_in,
 
     const int out_w = in_w - seam_count;
 
-    #pragma omp parallel for schedule(static, rows_per_chunk)
+    #pragma omp parallel for // schedule(static) //, rows_per_chunk)
     for (int i = 0; i < h; ++i) {
         int *row_seams = (int *)malloc((size_t)seam_count * sizeof(int));
 
@@ -696,130 +730,130 @@ static void run_triangle_mode(
     free(remove_indexes);
 }
 
-#ifndef CARVING_NO_MAIN
-int main(int argc, char *argv[])
-{
-    if (argc < 3)
-    {
-        exit(EXIT_FAILURE);
-    }
+// #ifndef CARVING_NO_MAIN
+// int main(int argc, char *argv[])
+// {
+//     if (argc < 3)
+//     {
+//         exit(EXIT_FAILURE);
+//     }
 
-    char image_in_name[MAX_FILENAME];
-    char image_out_name[MAX_FILENAME];
-    int seam_number = 1;
-    seam_mode_t mode = MODE_DYNAMIC;
-    int batch_size = 1;
-    int strip_height = 16;
-    snprintf(image_in_name, MAX_FILENAME, "%s", argv[1]);
-    snprintf(image_out_name, MAX_FILENAME, "%s", argv[2]);
+//     char image_in_name[MAX_FILENAME];
+//     char image_out_name[MAX_FILENAME];
+//     int seam_number = 1;
+//     seam_mode_t mode = MODE_DYNAMIC;
+//     int batch_size = 1;
+//     int strip_height = 16;
+//     snprintf(image_in_name, MAX_FILENAME, "%s", argv[1]);
+//     snprintf(image_out_name, MAX_FILENAME, "%s", argv[2]);
 
-    for (int argi = 3; argi < argc; ++argi) {
-        if (!strcmp(argv[argi], "--seam_number")) {
-            if (argi + 1 >= argc) {
-                printf("Error: Missing value for --seam_number\n");
-                exit(EXIT_FAILURE);
-            }
-            seam_number = atoi(argv[++argi]);
-            if (seam_number < 1) {
-                printf("Error: --seam_number must be >= 1\n");
-                exit(EXIT_FAILURE);
-            }
-        } else if (!strcmp(argv[argi], "--mode")) {
-            if (argi + 1 >= argc) {
-                printf("Error: Missing value for --mode\n");
-                exit(EXIT_FAILURE);
-            }
-            const char *mode_arg = argv[++argi];
-            if (!strcmp(mode_arg, "dynamic")) {
-                mode = MODE_DYNAMIC;
-            } else if (!strcmp(mode_arg, "greedy")) {
-                mode = MODE_GREEDY;
-            } else if (!strcmp(mode_arg, "triangle")) {
-                mode = MODE_TRIANGLE;
-            } else {
-                printf("Error: Unknown mode %s (expected dynamic|greedy|triangle)\n", mode_arg);
-                exit(EXIT_FAILURE);
-            }
-        } else if (!strcmp(argv[argi], "--batch_size")) {
-            if (argi + 1 >= argc) {
-                printf("Error: Missing value for --batch_size\n");
-                exit(EXIT_FAILURE);
-            }
-            batch_size = atoi(argv[++argi]);
-            if (batch_size < 1) {
-                printf("Error: --batch_size must be >= 1\n");
-                exit(EXIT_FAILURE);
-            }
-        } else if (!strcmp(argv[argi], "--strip_height")) {
-            if (argi + 1 >= argc) {
-                printf("Error: Missing value for --strip_height\n");
-                exit(EXIT_FAILURE);
-            }
-            strip_height = atoi(argv[++argi]);
-            if (strip_height < 1) {
-                printf("Error: --strip_height must be >= 1\n");
-                exit(EXIT_FAILURE);
-            }
-        } else {
-            printf("Error: Unknown option %s\n", argv[argi]);
-            printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy|triangle] [--batch_size K] [--strip_height SH]\n");
-            exit(EXIT_FAILURE);
-        }
-    }
+//     for (int argi = 3; argi < argc; ++argi) {
+//         if (!strcmp(argv[argi], "--seam_number")) {
+//             if (argi + 1 >= argc) {
+//                 printf("Error: Missing value for --seam_number\n");
+//                 exit(EXIT_FAILURE);
+//             }
+//             seam_number = atoi(argv[++argi]);
+//             if (seam_number < 1) {
+//                 printf("Error: --seam_number must be >= 1\n");
+//                 exit(EXIT_FAILURE);
+//             }
+//         } else if (!strcmp(argv[argi], "--mode")) {
+//             if (argi + 1 >= argc) {
+//                 printf("Error: Missing value for --mode\n");
+//                 exit(EXIT_FAILURE);
+//             }
+//             const char *mode_arg = argv[++argi];
+//             if (!strcmp(mode_arg, "dynamic")) {
+//                 mode = MODE_DYNAMIC;
+//             } else if (!strcmp(mode_arg, "greedy")) {
+//                 mode = MODE_GREEDY;
+//             } else if (!strcmp(mode_arg, "triangle")) {
+//                 mode = MODE_TRIANGLE;
+//             } else {
+//                 printf("Error: Unknown mode %s (expected dynamic|greedy|triangle)\n", mode_arg);
+//                 exit(EXIT_FAILURE);
+//             }
+//         } else if (!strcmp(argv[argi], "--batch_size")) {
+//             if (argi + 1 >= argc) {
+//                 printf("Error: Missing value for --batch_size\n");
+//                 exit(EXIT_FAILURE);
+//             }
+//             batch_size = atoi(argv[++argi]);
+//             if (batch_size < 1) {
+//                 printf("Error: --batch_size must be >= 1\n");
+//                 exit(EXIT_FAILURE);
+//             }
+//         } else if (!strcmp(argv[argi], "--strip_height")) {
+//             if (argi + 1 >= argc) {
+//                 printf("Error: Missing value for --strip_height\n");
+//                 exit(EXIT_FAILURE);
+//             }
+//             strip_height = atoi(argv[++argi]);
+//             if (strip_height < 1) {
+//                 printf("Error: --strip_height must be >= 1\n");
+//                 exit(EXIT_FAILURE);
+//             }
+//         } else {
+//             printf("Error: Unknown option %s\n", argv[argi]);
+//             printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy|triangle] [--batch_size K] [--strip_height SH]\n");
+//             exit(EXIT_FAILURE);
+//         }
+//     }
 
-    // Load image from file and allocate space for the output image
-    int w, h, cpp;
-    unsigned char *image_loaded = stbi_load(image_in_name, &w, &h, &cpp, COLOR_CHANNELS);
+//     // Load image from file and allocate space for the output image
+//     int w, h, cpp;
+//     unsigned char *image_loaded = stbi_load(image_in_name, &w, &h, &cpp, COLOR_CHANNELS);
 
-    const size_t datasize = w * h * cpp * sizeof(unsigned char);
-    unsigned char *image_a = (unsigned char *)malloc(datasize);
-    unsigned char *image_b = (unsigned char *)malloc(datasize);
-    unsigned char *image_energy = (unsigned char *)malloc(datasize);
+//     const size_t datasize = w * h * cpp * sizeof(unsigned char);
+//     unsigned char *image_a = (unsigned char *)malloc(datasize);
+//     unsigned char *image_b = (unsigned char *)malloc(datasize);
+//     unsigned char *image_energy = (unsigned char *)malloc(datasize);
 
-    // Copy the input image into output and mesure execution time
-    // copy_image(image_out, image_in, datasize);
-    memcpy(image_a, image_loaded, datasize);
-    stbi_image_free(image_loaded);
+//     // Copy the input image into output and mesure execution time
+//     // copy_image(image_out, image_in, datasize);
+//     memcpy(image_a, image_loaded, datasize);
+//     stbi_image_free(image_loaded);
 
-    if (seam_number > w - 1) {
-        seam_number = w - 1;
-    }
+//     if (seam_number > w - 1) {
+//         seam_number = w - 1;
+//     }
 
-    unsigned char *current_in = image_a;
-    unsigned char *current_out = image_b;
-    int active_w = w;
+//     unsigned char *current_in = image_a;
+//     unsigned char *current_out = image_b;
+//     int active_w = w;
 
-    if (mode == MODE_GREEDY) {
-        run_greedy_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, batch_size, &active_w);
-    } else if(mode == MODE_TRIANGLE) {
-        run_triangle_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, &active_w, strip_height);
-    } else {
-        run_dynamic_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, &active_w);
-    }
+//     if (mode == MODE_GREEDY) {
+//         run_greedy_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, batch_size, &active_w);
+//     } else if(mode == MODE_TRIANGLE) {
+//         run_triangle_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, &active_w, strip_height);
+//     } else {
+//         run_dynamic_mode(&current_in, &current_out, image_energy, h, cpp, seam_number, &active_w);
+//     }
 
-    // Write the output image to file
-    const char *file_type = strrchr(image_out_name, '.');  
-    file_type++; // skip the dot
+//     // Write the output image to file
+//     const char *file_type = strrchr(image_out_name, '.');  
+//     file_type++; // skip the dot
 
-    if (!strcmp(file_type, "png"))
-        stbi_write_png(image_out_name, active_w, h, cpp, current_in, active_w * cpp);
-    else if (!strcmp(file_type, "jpg"))
-        stbi_write_jpg(image_out_name, active_w, h, cpp, current_in, 100);
-    else if (!strcmp(file_type, "bmp"))
-        stbi_write_bmp(image_out_name, active_w, h, cpp, current_in);
-    else
-        printf("Error: Unknown image format %s\n", file_type);
+//     if (!strcmp(file_type, "png"))
+//         stbi_write_png(image_out_name, active_w, h, cpp, current_in, active_w * cpp);
+//     else if (!strcmp(file_type, "jpg"))
+//         stbi_write_jpg(image_out_name, active_w, h, cpp, current_in, 100);
+//     else if (!strcmp(file_type, "bmp"))
+//         stbi_write_bmp(image_out_name, active_w, h, cpp, current_in);
+//     else
+//         printf("Error: Unknown image format %s\n", file_type);
 
-    int out_w = 0, out_h = 0, out_cpp = 0;
-    unsigned char *verify_image = stbi_load(image_out_name, &out_w, &out_h, &out_cpp, 0);
-    if (verify_image != NULL) {
-        stbi_image_free(verify_image);
-    }
+//     int out_w = 0, out_h = 0, out_cpp = 0;
+//     unsigned char *verify_image = stbi_load(image_out_name, &out_w, &out_h, &out_cpp, 0);
+//     if (verify_image != NULL) {
+//         stbi_image_free(verify_image);
+//     }
 
-    free(image_a);
-    free(image_b);
-    free(image_energy);
+//     free(image_a);
+//     free(image_b);
+//     free(image_energy);
 
-    return 0;
-}
-#endif
+//     return 0;
+// }
+// #endif

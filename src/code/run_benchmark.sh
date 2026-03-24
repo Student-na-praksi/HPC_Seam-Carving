@@ -16,6 +16,11 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 module load numactl
 mkdir -p logs
-gcc -O3 --openmp -DCARVING_NO_MAIN carving.c benchmark.c -lm -lnuma -o benchmark
 
+gcc -O3 --openmp -DCARVING_NO_MAIN carving.c benchmark.c -lm -lnuma -o benchmark
 srun ./benchmark
+
+# export OMP_NUM_THREADS=1
+# export OMP_DYNAMIC=FALSE
+# gcc -O2 -fopenmp -lm -lnuma carving.c benchmark.c -o benchmark_seq
+# srun ./benchmark_seq

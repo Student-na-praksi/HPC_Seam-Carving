@@ -26,5 +26,15 @@ srun  carving ../test_images/3840x2160.png 3840x2160-dynamic-out.png --seam_numb
 srun carving ../test_images/3840x2160.png 3840x2160-triangle-out.png --seam_number 128 --mode triangle --strip_height 32
 #srun  carving valve.png valve-out.png --seam_number 80
 
+# # Compile without pragmas
+# gcc -O2 -lm -lnuma carving.c -o carving_seq
+
+# # Run sequentially
+# # srun  carving ../test_images/720x480.png 720x480-out.png --seam_number 80
+# srun  carving ../test_images/3840x2160.png 3840x2160-dynamic-seq-out.png --seam_number 128 --mode dynamic
+# # srun carving ../test_images/3840x2160.png 3840x2160-out.png --seam_number 512 --mode greedy --batch_size 8
+# srun carving ../test_images/3840x2160.png 3840x2160-triangle-seq-out.png --seam_number 128 --mode triangle --strip_height 32
+#srun  carving valve.png valve-out.png --seam_number 80
+
 # MONITOR SQUEUE every 2 seconds
 # for i in {1..5}; do echo -e "\033[36m\n=== [$i/5] $(date '+%Y-%m-%d %H:%M:%S') ===\033[0m"; squeue --me; if [ $i -lt 5 ]; then sleep 2; fi; done
