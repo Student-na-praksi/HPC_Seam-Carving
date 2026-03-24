@@ -123,8 +123,6 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
         int seams_for_image = seam_number;
         if (seams_for_image > w - 1) seams_for_image = w - 1;
 
-        printf("Image: %s | size=%dx%d cpp=%d | seams=%d\n", EXPERIMENT_IMAGE_FILES[idx], w, h, cpp, seams_for_image);
-
         double best_energy = 1e300;
         double best_seam = 1e300;
         double best_remove = 1e300;
@@ -135,30 +133,27 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
 
         const int base_threads = thread_max;
 
-        for (int threads = thread_min; threads <= thread_max; threads += thread_step) {
+        for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, threads, base_threads, base_threads, &tr);
-            printf("  energy sweep: e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", threads, base_threads, base_threads, tr.energy, tr.seam, tr.remove, tr.total);
             if (tr.energy < best_energy) {
                 best_energy = tr.energy;
                 best_energy_threads = threads;
             }
         }
 
-        for (int threads = thread_min; threads <= thread_max; threads += thread_step) {
+        for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, base_threads, threads, base_threads, &tr);
-            printf("  seam sweep:   e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", base_threads, threads, base_threads, tr.energy, tr.seam, tr.remove, tr.total);
             if (tr.seam < best_seam) {
                 best_seam = tr.seam;
                 best_seam_threads = threads;
             }
         }
 
-        for (int threads = thread_min; threads <= thread_max; threads += thread_step) {
+        for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, base_threads, base_threads, threads, &tr);
-            printf("  remove sweep: e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", base_threads, base_threads, threads, tr.energy, tr.seam, tr.remove, tr.total);
             if (tr.remove < best_remove) {
                 best_remove = tr.remove;
                 best_remove_threads = threads;
@@ -173,7 +168,6 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
             }
         }
 
-        printf("  best -> energy:%d seam:%d remove:%d | combined total=%.6f s\n\n", best_energy_threads, best_seam_threads, best_remove_threads, best_total);
         stbi_image_free(loaded);
     }
 
@@ -406,16 +400,37 @@ static int run_dynamic_vs_triangle_experiment(const char *images_dir, int seam_n
         int seams_for_image = seam_number;
         if (seams_for_image > w - 1) seams_for_image = w - 1;
 
-        unsigned char *dynamic_output = NULL;
-        unsigned char *triangle_output = NULL;
-        timing_result_t dynamic_result;
-        timing_result_t triangle_result;
 
-        run_dynamic_comparison_once(loaded, w, h, cpp, seams_for_image, num_threads, num_threads, num_threads, &dynamic_output, &dynamic_result);
-        run_triangle_comparison_once(loaded, w, h, cpp, seams_for_image, num_threads, num_threads, num_threads, strip_height, &triangle_output, &triangle_result);
+        // Averaging variables
+        double dyn_energy_sum = 0.0, dyn_seam_sum = 0.0, dyn_remove_sum = 0.0, dyn_total_sum = 0.0;
+        double tri_energy_sum = 0.0, tri_seam_sum = 0.0, tri_remove_sum = 0.0, tri_total_sum = 0.0;
 
-        double total_speedup = (triangle_result.total > 0.0) ? (dynamic_result.total / triangle_result.total) : 0.0;
-        double seam_speedup = (triangle_result.seam > 0.0) ? (dynamic_result.seam / triangle_result.seam) : 0.0;
+        for (int rep = 0; rep < BENCHMARK_REPEATS; ++rep) {
+            timing_result_t dynamic_result, triangle_result;
+            unsigned char *dyn_out = NULL, *tri_out = NULL;
+            run_dynamic_comparison_once(loaded, w, h, cpp, seams_for_image, num_threads, num_threads, num_threads, &dyn_out, &dynamic_result);
+            run_triangle_comparison_once(loaded, w, h, cpp, seams_for_image, num_threads, num_threads, num_threads, strip_height, &tri_out, &triangle_result);
+            dyn_energy_sum += dynamic_result.energy;
+            dyn_seam_sum += dynamic_result.seam;
+            dyn_remove_sum += dynamic_result.remove;
+            dyn_total_sum += dynamic_result.total;
+            tri_energy_sum += triangle_result.energy;
+            tri_seam_sum += triangle_result.seam;
+            tri_remove_sum += triangle_result.remove;
+            tri_total_sum += triangle_result.total;
+        }
+
+        double dyn_energy_avg = dyn_energy_sum / BENCHMARK_REPEATS;
+        double dyn_seam_avg = dyn_seam_sum / BENCHMARK_REPEATS;
+        double dyn_remove_avg = dyn_remove_sum / BENCHMARK_REPEATS;
+        double dyn_total_avg = dyn_total_sum / BENCHMARK_REPEATS;
+        double tri_energy_avg = tri_energy_sum / BENCHMARK_REPEATS;
+        double tri_seam_avg = tri_seam_sum / BENCHMARK_REPEATS;
+        double tri_remove_avg = tri_remove_sum / BENCHMARK_REPEATS;
+        double tri_total_avg = tri_total_sum / BENCHMARK_REPEATS;
+
+        double total_speedup = (tri_total_avg > 0.0) ? (dyn_total_avg / tri_total_avg) : 0.0;
+        double seam_speedup = (tri_seam_avg > 0.0) ? (dyn_seam_avg / tri_seam_avg) : 0.0;
 
         char base_name[256];
         snprintf(base_name, sizeof(base_name), "%s", EXPERIMENT_IMAGE_FILES[idx]);
@@ -427,33 +442,25 @@ static int run_dynamic_vs_triangle_experiment(const char *images_dir, int seam_n
         snprintf(dynamic_output_file, sizeof(dynamic_output_file), "%s/%s_dynamic.png", results_dir, base_name);
         snprintf(triangle_output_file, sizeof(triangle_output_file), "%s/%s_triangle.png", results_dir, base_name);
 
-        int out_w = w - seams_for_image;
-        stbi_write_png(dynamic_output_file, out_w, h, cpp, dynamic_output, out_w * cpp);
-        stbi_write_png(triangle_output_file, out_w, h, cpp, triangle_output, out_w * cpp);
-
         fprintf(csv,
-                "%s,%d,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%s,%s\n",
+                "%s,%d,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.4f\n",
                 EXPERIMENT_IMAGE_FILES[idx],
                 w,
                 h,
                 cpp,
                 seams_for_image,
                 strip_height,
-                dynamic_result.energy,
-                dynamic_result.seam,
-                dynamic_result.remove,
-                dynamic_result.total,
-                triangle_result.energy,
-                triangle_result.seam,
-                triangle_result.remove,
-                triangle_result.total,
+                dyn_energy_avg,
+                dyn_seam_avg,
+                dyn_remove_avg,
+                dyn_total_avg,
+                tri_energy_avg,
+                tri_seam_avg,
+                tri_remove_avg,
+                tri_total_avg,
                 total_speedup,
-                seam_speedup,
-                dynamic_output_file,
-                triangle_output_file);
+                seam_speedup);
 
-        free(dynamic_output);
-        free(triangle_output);
         stbi_image_free(loaded);
     }
 
@@ -481,37 +488,27 @@ static int run_greedy_vs_dynamic_experiment(const char *images_dir, int seam_num
         int seams_for_image = seam_number;
         if (seams_for_image > w - 1) seams_for_image = w - 1;
 
-        unsigned char *greedy_output = NULL;
-        unsigned char *dynamic_output = NULL;
 
-        greedy_vs_dynamic_result_t greedy_result;
-        timing_result_t dynamic_result;
+        // Averaging variables
+        double greedy_runtime_sum = 0.0, dynamic_total_sum = 0.0;
 
-        run_greedy_benchmark_once(loaded, w, h, cpp, seams_for_image, batch_size, num_threads, &greedy_output, &greedy_result);
-        run_dynamic_comparison_once(loaded, w, h, cpp, seams_for_image, num_threads, num_threads, num_threads, &dynamic_output, &dynamic_result);
+        for (int rep = 0; rep < BENCHMARK_REPEATS; ++rep) {
+            greedy_vs_dynamic_result_t greedy_result_tmp;
+            timing_result_t dynamic_result_tmp;
+            unsigned char *greedy_out = NULL, *dynamic_out = NULL;
+            run_greedy_benchmark_once(loaded, w, h, cpp, seams_for_image, batch_size, num_threads, &greedy_out, &greedy_result_tmp);
+            run_dynamic_comparison_once(loaded, w, h, cpp, seams_for_image, num_threads, num_threads, num_threads, &dynamic_out, &dynamic_result_tmp);
+            greedy_runtime_sum += greedy_result_tmp.runtime;
+            dynamic_total_sum += dynamic_result_tmp.total;
+        }
 
-        double speedup = dynamic_result.total / greedy_result.runtime;
+        
+        double greedy_runtime_avg = greedy_runtime_sum / BENCHMARK_REPEATS;
+        double dynamic_total_avg = dynamic_total_sum / BENCHMARK_REPEATS;
+        double speedup = dynamic_total_avg / greedy_runtime_avg;
+        
+        fprintf(csv, "%s,%d,%d,%d,%d,%.6f,%.6f,%.2f\n", EXPERIMENT_IMAGE_FILES[idx], w, h, cpp, seams_for_image, greedy_runtime_avg, dynamic_total_avg, speedup);
 
-        char base_name[256];
-        strncpy(base_name, EXPERIMENT_IMAGE_FILES[idx], sizeof(base_name) - 1);
-        char *dot = strrchr(base_name, '.');
-        if (dot) *dot = '\0';
-
-        char greedy_output_file[256];
-        char dynamic_output_file[256];
-        snprintf(greedy_output_file, sizeof(greedy_output_file), "%s/%s_greedy.png", results_dir, base_name);
-        snprintf(dynamic_output_file, sizeof(dynamic_output_file), "%s/%s_dynamic.png", results_dir, base_name);
-
-        const size_t greedy_size = (size_t)greedy_result.final_width * (size_t)h * (size_t)cpp;
-        const size_t dynamic_size = (size_t)(w - seams_for_image) * (size_t)h * (size_t)cpp;
-
-        stbi_write_png(greedy_output_file, greedy_result.final_width, h, cpp, greedy_output, greedy_result.final_width * cpp);
-        stbi_write_png(dynamic_output_file, w - seams_for_image, h, cpp, dynamic_output, (w - seams_for_image) * cpp);
-
-        fprintf(csv, "%s,%d,%d,%d,%d,%.6f,%.6f,%.2f,%s,%s\n", EXPERIMENT_IMAGE_FILES[idx], w, h, cpp, seams_for_image, greedy_result.runtime, dynamic_result.total, speedup, greedy_output_file, dynamic_output_file);
-
-        free(greedy_output);
-        free(dynamic_output);
         stbi_image_free(loaded);
     }
 
@@ -642,14 +639,15 @@ int main(void)
     const int seam_number = 32;
     const int thread_max = omp_get_num_procs();
     const int strip_height = 32;
+    const int batch_size = 32;
 
     // Dynamic thread experiment (optional)
-    // run_dynamic_thread_experiment(images_dir, seam_number, 1, thread_max, 1, "dynamic_thread_experiment.csv");
+    // run_dynamic_thread_experiment(images_dir, 128, 1, thread_max, 1, "dynamic_thread_experiment.csv");
 
     // Greedy vs Dynamic comparison experiment
     // const char *comparison_csv = "greedy_vs_dynamic_comparison.csv";
     // const int batch_size = 16;
-    // run_greedy_vs_dynamic_experiment(images_dir, 512, batch_size, thread_max, comparison_csv);
+    // run_greedy_vs_dynamic_experiment(images_dir, 512, batch_size, thread_max, "greedy_vs_dynamic_comparison_avg.csv");
 
     // Dynamic vs improved triangle
     //run_dynamic_vs_triangle_experiment(images_dir, 512, thread_max, strip_height, "triangle_vs_dynamic_comparison.csv");
