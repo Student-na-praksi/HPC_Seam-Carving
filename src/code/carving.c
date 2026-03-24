@@ -7,6 +7,8 @@
 #include <sched.h>
 #include <numa.h>
 
+#include "carving.h"
+
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image.h"
@@ -599,14 +601,7 @@ static void run_dynamic_mode(
         remove_seams(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes);
         double stop_seamRemoval = omp_get_wtime();
 
-        printf(
-            "Iter %d/%d | mode=dynamic | energy=%f s seam=%f s remove=%f s\n",
-            iter + 1,
-            seam_number,
-            stop_energy - start_energy,
-            stop_seamCarving - start_seamCarving,
-            stop_seamRemoval - start_seamRemoval
-        );
+        printf("Iter %d/%d | mode=dynamic | energy=%f s seam=%f s remove=%f s\n", iter + 1, seam_number, stop_energy - start_energy, stop_seamCarving - start_seamCarving, stop_seamRemoval - start_seamRemoval);
 
         unsigned char *tmp = *current_in;
         *current_in = *current_out;
@@ -655,30 +650,13 @@ static void run_greedy_mode(
         double stop_energy = omp_get_wtime();
 
         double start_seamCarving = omp_get_wtime();
-        int selected_seams = seam_carving_greedy(
-            image_energy,
-            *active_w,
-            h,
-            cpp,
-            rows_per_chunk,
-            remove_indexes,
-            seams_this_iter
-        );
+        int selected_seams = seam_carving_greedy(image_energy, *active_w, h, cpp, rows_per_chunk, remove_indexes, seams_this_iter);
         if (selected_seams < 1) selected_seams = 1;
         if (selected_seams > *active_w - 1) selected_seams = *active_w - 1;
         double stop_seamCarving = omp_get_wtime();
 
         double start_seamRemoval = omp_get_wtime();
-        remove_seams_multi(
-            *current_out,
-            *current_in,
-            *active_w,
-            h,
-            cpp,
-            rows_per_chunk,
-            remove_indexes,
-            selected_seams
-        );
+        remove_seams_multi(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes, selected_seams);
         double stop_seamRemoval = omp_get_wtime();
 
         printf(
@@ -729,14 +707,7 @@ static void run_triangle_mode(
         remove_seams(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes);
         double stop_seamRemoval = omp_get_wtime();
 
-        printf(
-            "Iter %d/%d | mode=triangle | energy=%f s seam=%f s remove=%f s\n",
-            iter + 1,
-            seam_number,
-            stop_energy - start_energy,
-            stop_seamCarving - start_seamCarving,
-            stop_seamRemoval - start_seamRemoval
-        );
+        printf("Iter %d/%d | mode=triangle | energy=%f s seam=%f s remove=%f s\n", iter + 1, seam_number, stop_energy - start_energy, stop_seamCarving - start_seamCarving, stop_seamRemoval - start_seamRemoval);
 
         unsigned char *tmp = *current_in;
         *current_in = *current_out;
@@ -747,9 +718,9 @@ static void run_triangle_mode(
     free(remove_indexes);
 }
 
+#ifndef CARVING_NO_MAIN
 int main(int argc, char *argv[])
 {
-
     if (argc < 3)
     {
         printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy|triangle] [--batch_size K] [--strip_height SH]\n");
@@ -900,3 +871,4 @@ int main(int argc, char *argv[])
 
     return 0;
 }
+#endif
