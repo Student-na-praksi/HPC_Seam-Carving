@@ -122,8 +122,6 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
         int seams_for_image = seam_number;
         if (seams_for_image > w - 1) seams_for_image = w - 1;
 
-        printf("Image: %s | size=%dx%d cpp=%d | seams=%d\n", EXPERIMENT_IMAGE_FILES[idx], w, h, cpp, seams_for_image);
-
         double best_energy = 1e300;
         double best_seam = 1e300;
         double best_remove = 1e300;
@@ -137,7 +135,6 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
         for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, threads, base_threads, base_threads, &tr);
-            printf("  energy sweep: e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", threads, base_threads, base_threads, tr.energy, tr.seam, tr.remove, tr.total);
             if (tr.energy < best_energy) {
                 best_energy = tr.energy;
                 best_energy_threads = threads;
@@ -147,7 +144,6 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
         for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, base_threads, threads, base_threads, &tr);
-            printf("  seam sweep:   e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", base_threads, threads, base_threads, tr.energy, tr.seam, tr.remove, tr.total);
             if (tr.seam < best_seam) {
                 best_seam = tr.seam;
                 best_seam_threads = threads;
@@ -157,7 +153,6 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
         for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, base_threads, base_threads, threads, &tr);
-            printf("  remove sweep: e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", base_threads, base_threads, threads, tr.energy, tr.seam, tr.remove, tr.total);
             if (tr.remove < best_remove) {
                 best_remove = tr.remove;
                 best_remove_threads = threads;
@@ -172,7 +167,6 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
             }
         }
 
-        printf("  best -> energy:%d seam:%d remove:%d | combined total=%.6f s\n\n", best_energy_threads, best_seam_threads, best_remove_threads, best_total);
         stbi_image_free(loaded);
     }
 
