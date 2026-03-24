@@ -627,10 +627,6 @@ static void run_greedy_mode(
     }
 
     int *remove_indexes = (int *)malloc((size_t)h * (size_t)batch_size * sizeof(int));
-    if (remove_indexes == NULL) {
-        printf("Error: Failed to allocate greedy seam index buffer!\n");
-        exit(EXIT_FAILURE);
-    }
 
     int removed_total = 0;
     int iter = 0;
@@ -658,17 +654,6 @@ static void run_greedy_mode(
         double start_seamRemoval = omp_get_wtime();
         remove_seams_multi(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes, selected_seams);
         double stop_seamRemoval = omp_get_wtime();
-
-        printf(
-            "Iter %d | mode=greedy | removed=%d (total=%d/%d) | energy=%f s seam=%f s remove=%f s\n",
-            iter,
-            selected_seams,
-            removed_total + selected_seams,
-            seam_number,
-            stop_energy - start_energy,
-            stop_seamCarving - start_seamCarving,
-            stop_seamRemoval - start_seamRemoval
-        );
 
         unsigned char *tmp = *current_in;
         *current_in = *current_out;
@@ -707,8 +692,6 @@ static void run_triangle_mode(
         remove_seams(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes);
         double stop_seamRemoval = omp_get_wtime();
 
-        printf("Iter %d/%d | mode=triangle | energy=%f s seam=%f s remove=%f s\n", iter + 1, seam_number, stop_energy - start_energy, stop_seamCarving - start_seamCarving, stop_seamRemoval - start_seamRemoval);
-
         unsigned char *tmp = *current_in;
         *current_in = *current_out;
         *current_out = tmp;
@@ -723,7 +706,6 @@ int main(int argc, char *argv[])
 {
     if (argc < 3)
     {
-        printf("USAGE: carving input_image output_image [--seam_number N] [--mode dynamic|greedy|triangle] [--batch_size K] [--strip_height SH]\n");
         exit(EXIT_FAILURE);
     }
 
@@ -794,24 +776,10 @@ int main(int argc, char *argv[])
     int w, h, cpp;
     unsigned char *image_loaded = stbi_load(image_in_name, &w, &h, &cpp, COLOR_CHANNELS);
 
-    if (image_loaded == NULL)
-    {
-        printf("Error reading loading image %s!\n", image_in_name);
-        exit(EXIT_FAILURE);
-    }
-    printf("Loaded image %s of size %dx%d with %d channels.\n", image_in_name, w, h, cpp);
     const size_t datasize = w * h * cpp * sizeof(unsigned char);
     unsigned char *image_a = (unsigned char *)malloc(datasize);
     unsigned char *image_b = (unsigned char *)malloc(datasize);
     unsigned char *image_energy = (unsigned char *)malloc(datasize);
-    if (image_a == NULL || image_b == NULL || image_energy == NULL) {
-        printf("Error: Failed to allocate memory for seam carving buffers!\n");
-        stbi_image_free(image_loaded);
-        free(image_a);
-        free(image_b);
-        free(image_energy);
-        exit(EXIT_FAILURE);
-    }
 
     // Copy the input image into output and mesure execution time
     // copy_image(image_out, image_in, datasize);
@@ -820,7 +788,6 @@ int main(int argc, char *argv[])
 
     if (seam_number > w - 1) {
         seam_number = w - 1;
-        printf("Adjusted seam count to %d (maximum possible for width %d).\n", seam_number, w);
     }
 
     unsigned char *current_in = image_a;
@@ -836,14 +803,7 @@ int main(int argc, char *argv[])
     }
 
     // Write the output image to file
-    const char *file_type = strrchr(image_out_name, '.');
-    if (file_type == NULL) {
-        printf("Error: No file extension found!\n");
-        free(image_a);
-        free(image_b);
-        free(image_energy);
-        exit(EXIT_FAILURE);
-    }   
+    const char *file_type = strrchr(image_out_name, '.');  
     file_type++; // skip the dot
 
     if (!strcmp(file_type, "png"))
@@ -853,18 +813,14 @@ int main(int argc, char *argv[])
     else if (!strcmp(file_type, "bmp"))
         stbi_write_bmp(image_out_name, active_w, h, cpp, current_in);
     else
-        printf("Error: Unknown image format %s! Only png, jpg, or bmp supported.\n", file_type);
+        printf("Error: Unknown image format %s\n", file_type);
 
     int out_w = 0, out_h = 0, out_cpp = 0;
     unsigned char *verify_image = stbi_load(image_out_name, &out_w, &out_h, &out_cpp, 0);
     if (verify_image != NULL) {
-        printf("Seam carving completed. Output file dimensions: %dx%d with %d channels\n", out_w, out_h, out_cpp);
         stbi_image_free(verify_image);
-    } else {
-        printf("Seam carving completed, but failed to re-open output file for dimension check: %s\n", image_out_name);
     }
 
-    // Release the memory
     free(image_a);
     free(image_b);
     free(image_energy);
