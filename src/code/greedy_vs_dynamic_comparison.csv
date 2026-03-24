@@ -1,0 +1,6 @@
+image,width,height,channels,seams,greedy_runtime_s,dynamic_runtime_s,speedup,greedy_output,dynamic_output,visual_notes
+720x480.png,720,480,3,512,0.048994,0.744485,15.20,greedy_vs_dynamic_results/720x480_greedy.png,greedy_vs_dynamic_results/720x480_dynamic.png
+1024x768.png,1024,768,3,512,0.291226,1.562053,5.36,greedy_vs_dynamic_results/1024x768_greedy.png,greedy_vs_dynamic_results/1024x768_dynamic.png
+1920x1200.png,1920,1200,3,512,0.341376,4.157165,12.18,greedy_vs_dynamic_results/1920x1200_greedy.png,greedy_vs_dynamic_results/1920x1200_dynamic.png
+3840x2160.png,3840,2160,3,512,1.388576,13.822545,9.95,greedy_vs_dynamic_results/3840x2160_greedy.png,greedy_vs_dynamic_results/3840x2160_dynamic.png
+7680x4320.png,7680,4320,3,512,6.319989,59.663512,9.44,greedy_vs_dynamic_results/7680x4320_greedy.png,greedy_vs_dynamic_results/7680x4320_dynamic.png

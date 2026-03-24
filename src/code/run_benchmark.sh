@@ -4,7 +4,7 @@
 #SBATCH --job-name=seam_benchmark
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --output=benchmark_out.log
+#SBATCH -o ./logs/seam-benchmark-out-%J.log
 #SBATCH -e ./logs/seam-benchmark-err-%J.log
 #SBATCH --hint=nomultithread
 
