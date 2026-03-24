@@ -578,17 +578,11 @@ static void run_dynamic_mode(
     for (int iter = 0; iter < seam_number; ++iter) {
         int rows_per_chunk = estimate_rows_per_chunk(*active_w, cpp);
 
-        double start_energy = omp_get_wtime();
         calculate_energy(image_energy, *current_in, *active_w, h, cpp, rows_per_chunk);
-        double stop_energy = omp_get_wtime();
 
-        double start_seamCarving = omp_get_wtime();
         seam_carving_dynamic(image_energy, *active_w, h, cpp, rows_per_chunk, remove_indexes);
-        double stop_seamCarving = omp_get_wtime();
 
-        double start_seamRemoval = omp_get_wtime();
         remove_seams(*current_out, *current_in, *active_w, h, cpp, rows_per_chunk, remove_indexes);
-        double stop_seamRemoval = omp_get_wtime();
 
         unsigned char *tmp = *current_in;
         *current_in = *current_out;
