@@ -3,7 +3,7 @@
 #SBATCH --reservation=fri
 #SBATCH --job-name=seam_benchmark
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32
 #SBATCH -o ./logs/seam-benchmark-out-%J.log
 #SBATCH -e ./logs/seam-benchmark-err-%J.log
 #SBATCH --hint=nomultithread

@@ -25,7 +25,7 @@ static const char *EXPERIMENT_IMAGE_FILES[] = {
 
 #define EXPERIMENT_IMAGE_COUNT 5
 
-#define BENCHMARK_REPEATS 10
+#define BENCHMARK_REPEATS 5
 
 typedef struct {
     double energy;
@@ -134,7 +134,7 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
 
         const int base_threads = thread_max;
 
-        for (int threads = thread_min; threads <= thread_max; threads += thread_step) {
+        for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, threads, base_threads, base_threads, &tr);
             printf("  energy sweep: e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", threads, base_threads, base_threads, tr.energy, tr.seam, tr.remove, tr.total);
@@ -144,7 +144,7 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
             }
         }
 
-        for (int threads = thread_min; threads <= thread_max; threads += thread_step) {
+        for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, base_threads, threads, base_threads, &tr);
             printf("  seam sweep:   e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", base_threads, threads, base_threads, tr.energy, tr.seam, tr.remove, tr.total);
@@ -154,7 +154,7 @@ static int run_dynamic_thread_experiment(const char *images_dir, int seam_number
             }
         }
 
-        for (int threads = thread_min; threads <= thread_max; threads += thread_step) {
+        for (int threads = thread_min; threads <= thread_max; threads *= 2) {
             timing_result_t tr;
             run_dynamic_benchmark_once(loaded, w, h, cpp, seams_for_image, base_threads, base_threads, threads, &tr);
             printf("  remove sweep: e=%d s=%d r=%d | energy=%.6f s seam=%.6f s remove=%.6f s total=%.6f s\n", base_threads, base_threads, threads, tr.energy, tr.seam, tr.remove, tr.total);
@@ -527,17 +527,22 @@ int main(void)
     const int seam_number = 32;
     const int thread_max = omp_get_num_procs();
     const int strip_height = 32;
+    const int batch_size = 32;
 
     // Dynamic thread experiment (optional)
-    // run_dynamic_thread_experiment(images_dir, seam_number, 1, thread_max, 1, "dynamic_thread_experiment.csv");
+    // run_dynamic_thread_experiment(images_dir, 128, 1, thread_max, 1, "dynamic_thread_experiment.csv");
 
     // Greedy vs Dynamic comparison experiment
     // const char *comparison_csv = "greedy_vs_dynamic_comparison.csv";
     // const int batch_size = 16;
-    run_greedy_vs_dynamic_experiment(images_dir, 512, batch_size, thread_max, comparison_csv);
+    // run_greedy_vs_dynamic_experiment(images_dir, 512, batch_size, thread_max, "greedy_vs_dynamic_comparison_avg.csv");
 
     // Dynamic vs improved triangle
     // run_dynamic_vs_triangle_experiment(images_dir, 512, thread_max, strip_height, "triangle_vs_dynamic_comparison.csv");
+
+    // run_dynamic_vs_triangle_experiment(images_dir, 512, thread_max, 32, "test.csv");
+    // run_dynamic_vs_triangle_experiment(images_dir, 512, thread_max, 64, "triangle_vs_dynamic_comparison_64.csv");
+    run_dynamic_vs_triangle_experiment(images_dir, 512, thread_max, 128, "triangle_vs_dynamic_comparison_128.csv");
 
     return 0;
 }
